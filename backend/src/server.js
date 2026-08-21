@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -12,12 +14,16 @@ if (!MONGODB_URI) {
 
 const server = express();
 
-mongoose.connect(MONGODB_URI, {
-    useNewUrlParser: true
-});
+mongoose
+    .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+    .then(() => console.log('MongoDB connected'))
+    .catch((err) => {
+        console.error('MongoDB connection error:', err.message);
+        process.exit(1);
+    });
 
 server.use(cors());
 server.use(express.json());
 server.use(routes);
 
-server.listen(PORT);
+server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
