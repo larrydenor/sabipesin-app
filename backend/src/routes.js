@@ -1,17 +1,9 @@
 const express = require('express');
-const DevController = require('./controllers/DevController');
-const LikeController = require('./controllers/LikeController');
-const DislikeController = require('./controllers/DislikeController');
-const LoginController = require('./controllers/LoginController');
 
 const routes = express.Router();
 
-routes.get('/devs', DevController.index);
-routes.post('/devs', DevController.store);
-
-routes.post('/devs/:devId/likes', LikeController.store);
-routes.post('/devs/:devId/dislikes', DislikeController.store);
-
-//routes.post('/login', LoginController.store);
+// Auth and Dev routes were removed with the old fake-auth teardown
+// (GitHub-API signup, spoofable user-header identity, dead LoginController).
+// Real JWT/OTP auth and the rebuilt endpoints will be added here.
 
 module.exports = routes;
