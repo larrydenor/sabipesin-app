@@ -98,17 +98,10 @@ async function requestOtp(req, res) {
     const code = generateCode();
     const codeHash = await bcrypt.hash(code, BCRYPT_ROUNDS);
 
-    let messageId;
-    try {
-        const message = `Your SabiPesin verification code is ${code}. It expires in ${OTP_TTL_MS / 60000} minutes.`;
-        ({ messageId } = await termii.sendSms(phone, message));
-    } catch (err) {
-        if (err instanceof termii.TermiiError) {
-            console.error('Termii sendSms failed:', err.message, err.data || '');
-            return res.status(502).json({ error: 'Could not send verification code, please try again' });
-        }
-        throw err;
-    }
+    // A TermiiError here propagates to the central error handler (-> 502); the
+    // throw also stops execution, so no Verification is recorded on a failed send.
+    const message = `Your SabiPesin verification code is ${code}. It expires in ${OTP_TTL_MS / 60000} minutes.`;
+    const { messageId } = await termii.sendSms(phone, message);
 
     // Only one code is live at a time: supersede any earlier pending codes so an
     // older SMS can't also be used to verify.
