@@ -14,7 +14,7 @@ This is a hand-off document for Claude Code. It translates everything decided du
 - Open accounts under SabiPesin Ltd (approval takes real calendar time, start these in parallel with coding):
   - Paystack (business/KYB verification required before live payments)
   - QoreID for NIN/selfie verification — already in use elsewhere, sandbox access available; open the fresh production account now that CAC registration is underway
-  - Africa's Talking for SMS OTP — already in use elsewhere, process understood; open the fresh account under SabiPesin Ltd
+  - Termii for SMS OTP — workspace "SabiPesin Ltd" created, API key generated (switched from Africa's Talking after a lengthy account-approval appointment delay; Termii's sandbox/live send worked without that gate)
   - Cloudinary for photo storage — already in use elsewhere; open the fresh account under SabiPesin Ltd
 - Native app, launching on both the App Store and Google Play — decided, no longer PWA-first. This means `mobile/` (currently untouched React Native boilerplate in Tindev) gets built out from Phase 1 onward, not deferred.
 
@@ -30,9 +30,8 @@ PORT=3333
 NODE_ENV=development
 
 # SMS OTP (phone verification)
-OTP_PROVIDER=africastalking
-AT_USERNAME=
-AT_API_KEY=
+OTP_PROVIDER=termii
+TERMII_API_KEY=
 
 # NIN/selfie verification vendor
 KYC_PROVIDER=qoreid
@@ -337,6 +336,7 @@ Confirmed against Apple's 2026 App Review Guidelines. These aren't optional poli
 - **Minimum functionality (Guideline 4.2).** The app must use real native features, not just wrap a web view — push notifications, camera access for verification selfies, and native navigation all help satisfy this.
 - **Demo access for the reviewer.** Apple's reviewers need a way to test the full flow, including matching and chat, without needing a second real phone number for OTP — plan for a reviewer test account that bypasses OTP/NIN in a controlled way, documented in the App Store Connect review notes.
 - **Age rating.** Dating apps are typically rated 17+ on the App Store; factor this into App Store Connect setup in Phase 10.
+- **Termii Sender ID isn't required for Phase 1 development** — OTP sends work against a generic number without one. It is required before production launch (so OTPs arrive branded "SabiPesin" and route reliably around DND-registered numbers). Budget real time for this: CraftRanked's own Sender ID took from an early-year application to an August 4th approval — weeks, not the "1-3 business days" the platform advertises. Start this application as early as possible once SabiPesin's CAC documents are ready, well ahead of when it's actually needed for launch.
 
 ---
 
