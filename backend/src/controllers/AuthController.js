@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 const User = require('../models/User');
 const Verification = require('../models/Verification');
 const termii = require('../services/termii');
+const { issueTokens } = require('../utils/jwt');
 
 const PROVIDER = 'termii';
 
@@ -130,12 +131,10 @@ async function requestOtp(req, res) {
     return res.json({ message: 'Verification code sent', phone });
 }
 
-// POST /auth/otp/verify  { phone, code }
+// POST /auth/otp/verify  { phone, code }  -> { accessToken, refreshToken }
 // Verifies the code against the latest pending OTP for this phone. Enforces
-// expiry and a max-attempts cap. On success: marks the Verification verified and
-// stamps user.phoneVerifiedAt.
-// NOTE: JWT/refresh-token issuance is intentionally NOT wired in yet (spec §6) —
-// this endpoint currently proves the OTP round-trip only.
+// expiry and a max-attempts cap. On success: marks the Verification verified,
+// stamps user.phoneVerifiedAt, and issues access + refresh tokens (spec §6).
 async function verifyOtp(req, res) {
     const phone = normalizePhone(req.body.phone);
     const { code } = req.body;
@@ -194,11 +193,14 @@ async function verifyOtp(req, res) {
         await user.save();
     }
 
-    // TODO: issue access + refresh tokens here (spec §6) once JWT wiring lands.
+    const { accessToken, refreshToken } = issueTokens(user);
+
     return res.json({
         message: 'Phone verified',
         phone,
         verificationTier: user.verificationTier,
+        accessToken,
+        refreshToken,
     });
 }
 
