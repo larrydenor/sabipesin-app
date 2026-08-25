@@ -5,6 +5,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 
 const routes = require('./routes');
+const errorHandler = require('./middlewares/errorHandler');
 
 const { MONGODB_URI, PORT = 3333 } = process.env;
 
@@ -25,5 +26,7 @@ mongoose
 server.use(cors());
 server.use(express.json());
 server.use(routes);
+// Error-handling middleware must be registered after the routes it covers.
+server.use(errorHandler);
 
 server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));

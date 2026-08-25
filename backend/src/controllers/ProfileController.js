@@ -12,16 +12,11 @@ const EDITABLE_FIELDS = [
 
 // GET /profile/me
 async function getMe(req, res) {
-    try {
-        const profile = await Profile.findOne({ userId: req.userId });
-        if (!profile) {
-            return res.status(404).json({ error: 'Profile not found' });
-        }
-        return res.json(profile);
-    } catch (err) {
-        console.error('getMe failed:', err.message);
-        return res.status(500).json({ error: 'Could not load profile' });
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) {
+        return res.status(404).json({ error: 'Profile not found' });
     }
+    return res.json(profile);
 }
 
 // PUT /profile/me
@@ -52,20 +47,14 @@ async function updateMe(req, res) {
         update.location = { type: 'Point', coordinates: [lng, lat] };
     }
 
-    try {
-        const profile = await Profile.findOneAndUpdate(
-            { userId: req.userId },
-            { $set: update, $setOnInsert: { userId: req.userId } },
-            { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
-        );
-        return res.json(profile);
-    } catch (err) {
-        if (err.name === 'ValidationError' || err.name === 'CastError') {
-            return res.status(400).json({ error: err.message });
-        }
-        console.error('updateMe failed:', err.message);
-        return res.status(500).json({ error: 'Could not update profile' });
-    }
+    // Mongoose ValidationError / CastError (e.g. a bad enum) propagate to the
+    // central error handler, which maps them to 400.
+    const profile = await Profile.findOneAndUpdate(
+        { userId: req.userId },
+        { $set: update, $setOnInsert: { userId: req.userId } },
+        { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+    );
+    return res.json(profile);
 }
 
 module.exports = {
