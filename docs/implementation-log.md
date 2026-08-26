@@ -404,3 +404,75 @@ a suspended user, a real A-B match and conversation.
 - The 14-case `isScammy` unit table (send money / gift card / wire transfer /
   bank account digits / BVN / bitcoin / western union, and clean-message
   negatives) also passes.
+
+---
+
+## NIN + selfie verification (start) — `POST /verification/nin/start`
+
+**Built:** The kickoff half of the QoreID KYC integration (Phase 5). Starts a NIN
++ selfie verification session and records a pending `Verification`. The vendor
+webhook that actually sets `user.ninVerifiedAt` is a **separate, later slice** —
+deliberately not built here.
+
+- `POST /verification/nin/start` — authenticated, no body. Mints a QoreID
+  verification session for the caller and returns what the client needs to
+  continue on-device:
+  ```json
+  { "message": "...", "provider": "qoreid", "sessionId": "...",
+    "sdkSessionToken": "...", "expiresAt": "...", "mock": false }
+  ```
+  `sdkSessionToken` is the JWT the QoreID SDK uses to run the NIN lookup + selfie
+  liveness capture; `sessionId` is stored as the Verification's `providerRef` so
+  the webhook can later resolve the result back to the row.
+  - Creates a pending `Verification` with `type: 'nin_selfie'`, `status:
+    'pending'`, `provider: 'qoreid'` (spec §3, §6), stamping `expiresAt` from the
+    session's expiry.
+  - Supersedes any earlier `pending` `nin_selfie` rows for the user to `failed`
+    (only one live session at a time — mirrors the OTP supersede in
+    `AuthController`).
+  - `409` if the user is already NIN-verified (`ninVerifiedAt` set) — nothing to do.
+
+- `src/services/qoreid.js` — new service, same shape as `termii.js`/`cloudinary.js`:
+  a `QoreIdError` (matched by name in `errorHandler` → `502`) and
+  `startNinVerification({ reference, subjectRef })`. Live path:
+  `POST {QOREID_BASE_URL}/v1/sessions` with HTTP Basic auth
+  (`base64(clientId:secret)`) and an `Idempotency-Key`, per QoreID's session API.
+  Returns `{ sessionId, sdkSessionToken, expiresAt, productCode, mock }`.
+
+- **`QOREID_ENABLED` dev-mode toggle** (the todo-list item). When not `'true'`
+  (the dev default), the service skips the vendor entirely and returns a
+  well-formed **mocked** session (`mock: true`), so the client flow and the
+  pending-record write can be exercised locally without a real (billable) call.
+  Mirrors CraftRanked's `QOREID_ENABLED=false` pattern. Set `QOREID_ENABLED=true`
+  with sandbox/production credentials to run live.
+
+**New files:**
+- `src/services/qoreid.js`
+- `src/controllers/VerificationController.js`
+
+**Env:** added `QOREID_ENABLED`, `QOREID_BASE_URL`, `QOREID_NIN_PRODUCT_CODE`,
+`QOREID_SESSION_TTL_SECONDS`, `QOREID_SESSION_MAX_ATTEMPTS` to `.env.example`
+(alongside the spec's `QOREID_CLIENT_ID`/`QOREID_SECRET`/`QOREID_WEBHOOK_SECRET`).
+
+**Deviations from / additions to spec:**
+- The spec (§6) names the route and its purpose ("kicks off KYC vendor session")
+  but not the response shape — the session-token payload above is a sensible,
+  vendor-driven choice. QoreID's session flow returns an SDK token the client
+  runs the capture with, rather than a redirect URL.
+- `QOREID_ENABLED` and the session tuning vars aren't in the spec's §1 env list —
+  added per the todo-list "QoreID dev-mode toggle" item.
+- `productCode` for the NIN-face-match session isn't nailed down in QoreID's
+  public sandbox docs, so it's env-configurable (`QOREID_NIN_PRODUCT_CODE`,
+  default `nin_face_match`) rather than hardcoded — confirm against the sandbox
+  dashboard when live credentials land.
+- Webhook (`POST /verification/nin/webhook`) and `GET /verification/status`
+  (both spec §6) are intentionally out of scope for this slice.
+
+**Verification:** Exercised the service in isolation (no DB/network needed):
+- Dev mode (`QOREID_ENABLED=false`) → returns `mock: true` with
+  `mock_sess_`/`mock_sdk_` ids and a future `expiresAt`; no HTTP call made.
+- Enabled without credentials → throws `QoreIdError` with the actionable
+  "set QOREID_ENABLED=false for dev mode" message (→ `502`).
+- `routes.js` loads and registers `POST /verification/nin/start`.
+Full request-path (auth → pending row written → 409-when-verified) not yet
+smoke-tested against live MongoDB — worth a run alongside the webhook slice.
