@@ -319,3 +319,88 @@ conversations (A-B and A-D) off real matches, and 5 messages in A-B with distinc
 
 Schema shapes were also asserted directly: `Message.flagged` defaults to `false`,
 `Message.readAt` to `null`, `Conversation.matchId` is `unique`.
+
+---
+
+## Messaging real-time layer — Socket.IO + anti-scam flagging
+
+**Built:** The rest of Phase 5 (spec §6, §8.5): Socket.IO wired onto the same HTTP
+port as the REST API, the four messaging events, and the anti-scam keyword filter
+that flags (never blocks) money-request messages.
+
+**Server wiring** (`src/server.js`): Express is now wrapped in a raw
+`http.createServer(app)` so Socket.IO can share the port; `server.listen` is
+unchanged. A `Server` is attached with `cors: { origin: '*' }` (matches the
+existing permissive REST CORS — tighten both before production) and handed to
+`initSocket`.
+
+**Connection auth** (`src/socket/index.js`): an `io.use` handshake middleware
+mirrors the HTTP `auth` middleware — it reads the access token from
+`handshake.auth.token` **or** a `Bearer` Authorization header, verifies it,
+loads the user, and rejects missing/invalid tokens and non-`active` accounts. An
+authenticated socket joins a room named after its `userId`, so delivering to a
+user is `io.to(userId).emit(...)`: it fans out to all their open devices and is a
+no-op when they're offline.
+
+**Events** (`src/socket/messageHandlers.js`) — every handler re-authorizes against
+conversation membership on each call (an authenticated socket ≠ access to a
+thread), reusing the same 404-scoping posture as the REST endpoints (missing,
+malformed, and foreign conversation ids are indistinguishable):
+- `message:send` `{ conversationId, text }` → trims text (rejects empty), scans it
+  for scam keywords, creates the `Message` (with `flagged`), bumps the
+  conversation's `lastMessageAt` to the new message's `createdAt`, and emits
+  `message:receive` to the **other** participant's room. The optional ack echoes
+  the stored message (id, server timestamp, `flagged` verdict) back to the sender;
+  the message is **not** echoed to the sender via `message:receive`.
+- `typing` `{ conversationId, isTyping }` → fire-and-forget relay to the other
+  participant; not persisted, no ack.
+- `read` `{ conversationId }` → sets `readAt = now` on the **peer's** unread
+  messages to me (`senderId ≠ me, readAt: null`) via `updateMany`, emits `read`
+  `{ conversationId, readerId, readAt }` to the peer, and acks the updated count.
+  This is the first writer of `Message.readAt` (the REST endpoints left it null).
+
+**Anti-scam filter** (`src/utils/antiScam.js`, spec §8.5): `isScammy(text)` — a
+case-insensitive, whitespace-tolerant set of money-request keyword patterns (send
+money, gift card, wire transfer, bank/account details, western union / moneygram,
+BVN / NUBAN, crypto) plus a heuristic that flags any run of 10+ digits (a
+Nigerian NUBAN account number). A trip only sets `flagged: true`; it never blocks
+or edits the message. Because flagging is non-destructive, the heuristics
+deliberately favour recall over precision.
+
+**New files:**
+- `src/socket/index.js`, `src/socket/messageHandlers.js`
+- `src/utils/antiScam.js`
+
+**Dependencies:** added `socket.io` (^4.8.3).
+
+**Deviations from spec:**
+- The socket contract (payload shapes, ack callbacks, room-per-user delivery) is
+  not specified beyond the four event names — these are sensible, REST-consistent
+  choices. `message:send`'s ack echoes the stored message so the sender gets the
+  server id/timestamp/`flagged` verdict without a refetch.
+- The 10+-digit account-number heuristic can also trip on a pasted phone number.
+  Accepted: flagging never blocks, so a false positive only shows the standing
+  safety banner.
+- `read` marks the whole thread read (not per-message ids) — matches the mockup's
+  "opened the chat" semantics; per-message receipts can be added later if needed.
+
+**Verification:** Smoke-tested end-to-end against live MongoDB (24 assertions, all
+passing) by driving the real handlers and the real `initSocket` auth middleware
+with a mock `io`/`socket` (same approach as the data-layer entry), temp data
+cleaned up after. Seed: users A (phone-verified), B (NIN-verified), C (outsider),
+a suspended user, a real A-B match and conversation.
+- `message:send` (as A): clean text → ack ok, `flagged: false`, message persisted
+  with sender+text, `message:receive` delivered to **B only** (not echoed to A),
+  `lastMessageAt` bumped to the new message's `createdAt`. Scam text
+  (`"send me money via gift card 0123456789"`) → `flagged: true`, still delivered
+  (not blocked). Empty/whitespace text → negative ack, no message created.
+  Non-participant C and a malformed conversation id → negative ack, no message,
+  no cast crash.
+- `typing` → relayed to B with `userId` + `isTyping`; non-participant emits nothing.
+- `read` (as B) → A's two messages get `readAt` set, ack `updated: 2`, `read`
+  receipt emitted to A with `readerId: B`.
+- Handshake auth: valid token (via `auth.token` and via `Bearer` header) accepted;
+  missing token, garbage token, and a suspended user all rejected.
+- The 14-case `isScammy` unit table (send money / gift card / wire transfer /
+  bank account digits / BVN / bitcoin / western union, and clean-message
+  negatives) also passes.
