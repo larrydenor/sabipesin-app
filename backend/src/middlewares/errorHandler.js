@@ -20,6 +20,13 @@ function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-va
         return res.status(502).json({ error: 'Could not send verification code, please try again' });
     }
 
+    // Downstream KYC provider (QoreID) failure — matched by name to avoid
+    // coupling this module to the service that defines QoreIdError.
+    if (err.name === 'QoreIdError') {
+        console.error('QoreID error:', err.message, err.data || '');
+        return res.status(502).json({ error: 'Could not start NIN verification, please try again' });
+    }
+
     // Multer rejected the upload (too large, wrong field, non-image) — client error.
     if (err.name === 'MulterError') {
         const messages = {

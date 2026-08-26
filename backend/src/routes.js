@@ -7,6 +7,7 @@ const SwipeController = require('./controllers/SwipeController');
 const DiscoveryController = require('./controllers/DiscoveryController');
 const MatchController = require('./controllers/MatchController');
 const ConversationController = require('./controllers/ConversationController');
+const VerificationController = require('./controllers/VerificationController');
 const authMiddleware = require('./middlewares/auth');
 const asyncHandler = require('./utils/asyncHandler');
 
@@ -34,6 +35,12 @@ const auth = asyncHandler(authMiddleware);
 // Phone OTP auth (spec §6).
 routes.post('/auth/otp/request', asyncHandler(AuthController.requestOtp));
 routes.post('/auth/otp/verify', asyncHandler(AuthController.verifyOtp));
+
+// NIN + selfie verification (spec §6, §4.2). Authenticated. Starts a QoreID KYC
+// session and records a pending nin_selfie Verification; returns the SDK session
+// token the client uses to run the on-device NIN lookup + selfie capture. The
+// vendor webhook that sets ninVerifiedAt is a later slice of Phase 5.
+routes.post('/verification/nin/start', auth, asyncHandler(VerificationController.startNin));
 
 // Profile CRUD (spec §6). Authenticated; a user only ever reads/writes their
 // own profile. Photo upload and discovery-settings are separate endpoints.
