@@ -78,3 +78,67 @@ NIN reciprocity rule (spec §4.5). `PUT /profile/me` remains blocked from writin
 partial updates preserve prior fields; defaults apply on insert; and the
 validation cases (`min < 18`, `min > max`, negative distance, non-boolean, empty
 body) all return `400`.
+
+---
+
+## Swipe & match creation — `Swipe` model, `Match` model, `POST /swipes`
+
+**Built:** The `Swipe` and `Match` Mongoose models (spec §3) and the swipe
+endpoint that records a swipe and forms a `Match` on a mutual like/superlike.
+`GET /discovery` and `GET /matches` are intentionally **not** built yet — this is
+just the swipe-and-match-creation slice.
+
+**Models:**
+- `Swipe` — `{ actorId, targetId, action: enum('like','pass','superlike') }`.
+  Compound **unique** index on `(actorId, targetId)` — one swipe per pair.
+- `Match` — `{ userA, userB, matchedAt, status: enum('active','unmatched') }`.
+  The pair is stored **canonically** (`userA` = smaller ObjectId by hex string),
+  with a compound **unique** index on `(userA, userB)`, so a match between two
+  people is a single document regardless of who liked first. A `pre('validate')`
+  hook canonicalizes the pair for direct `.create()`/`.save()` callers; the
+  controller sorts the pair itself for its upsert (pre-hooks don't fire on
+  `findOneAndUpdate`).
+
+**Endpoint** — `POST /swipes` (authenticated). Body: `{ targetId, action }`.
+- Validates `action` against the enum, `targetId` as a real ObjectId, rejects
+  self-swipes (`400`), and `404`s if the target user doesn't exist.
+- Records the swipe via **upsert** on `(actorId, targetId)`, so re-swiping the
+  same person updates the action in place (e.g. a prior `pass` → `like`) instead
+  of colliding on the unique index — last action wins.
+- If the swipe is a `like`/`superlike` **and** the target has already
+  liked/superliked the actor, creates the `Match` (upsert on the sorted pair;
+  duplicate-key `11000` from a simultaneous mutual like is caught and the existing
+  match re-read). A `pass` never forms a match.
+- Returns `201` with `{ swipe, isMatch, match }` (`match` is `null` when no match
+  formed).
+
+**Deviations from spec:**
+- Both models carry `timestamps: true` (adds `createdAt`/`updatedAt`), matching
+  every other model in the codebase. The spec lists only `createdAt` on `Swipe`
+  and only `matchedAt` on `Match`; the extra timestamps are additive. `matchedAt`
+  is kept as the spec's canonical "when the match formed" field.
+- `POST /swipes` **upserts** the swipe rather than rejecting a duplicate. Reason:
+  lets a user change their mind (pass → like) and makes retries idempotent instead
+  of surfacing a raw duplicate-key error. Not specified either way.
+- Match creation leaves an existing `unmatched` match untouched (`$setOnInsert`
+  only). Re-activation semantics belong with the unmatch feature, which isn't
+  built yet.
+
+**Verification:** Smoke-tested end-to-end against live MongoDB (29 assertions,
+all passing) via the real controller with mock req/res, temp users cleaned up
+after the run:
+- Validation: self-swipe, bad `action`, non-ObjectId `targetId` → `400`;
+  non-existent target → `404`.
+- One-sided like → `201`, `isMatch: false`, no Match document written.
+- Reciprocal like → `isMatch: true`, exactly one Match, pair stored canonically
+  (`userA` < `userB`), `status: active`.
+- **pass → like on the same target:** the pass leaves one swipe row (no match);
+  the later like **upserts that same row in place** (still one row, action flips
+  `pass → like`) and forms the match. Confirms upsert-on-repeat-swipe as built.
+- **Simultaneous mutual like** (two concurrent `POST /swipes`, both directions):
+  no throw, both `201`, exactly one Match. The duplicate-key `11000` recovery
+  branch itself was additionally forced with two concurrent raw inserts on one
+  pair — the loser raises `11000`, and catch-then-refetch returns the single
+  surviving match. (`findOneAndUpdate`+upsert resolves the pair server-side and
+  rarely surfaces `11000` on its own, so the invariant and the recovery path were
+  verified separately.)
