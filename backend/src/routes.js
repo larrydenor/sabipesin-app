@@ -3,6 +3,7 @@ const multer = require('multer');
 
 const AuthController = require('./controllers/AuthController');
 const ProfileController = require('./controllers/ProfileController');
+const SwipeController = require('./controllers/SwipeController');
 const authMiddleware = require('./middlewares/auth');
 const asyncHandler = require('./utils/asyncHandler');
 
@@ -43,5 +44,9 @@ routes.delete('/profile/photos/:photoId', auth, asyncHandler(ProfileController.d
 // Discovery settings (spec §6). Enforces the NIN reciprocity rule (§4.5) — the
 // one write path allowed to set showOnlyNinVerified.
 routes.put('/profile/discovery-settings', auth, asyncHandler(ProfileController.updateDiscoverySettings));
+
+// Swipe + match creation (spec §6). Records a swipe and forms a Match on a mutual
+// like/superlike. GET /discovery and GET /matches are deferred to a later step.
+routes.post('/swipes', auth, asyncHandler(SwipeController.createSwipe));
 
 module.exports = routes;
