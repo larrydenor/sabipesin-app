@@ -1,4 +1,9 @@
 const Profile = require('../models/Profile');
+const { uploadImage, deleteImage } = require('../services/cloudinary');
+
+// Max photos per profile. Dating apps cap this; keeps a single profile from
+// filling the Cloudinary account. Not in the spec — a sensible default.
+const MAX_PHOTOS = 6;
 
 // Fields a user may set on their own profile via PUT /profile/me. Deliberately
 // excludes: userId (identity), photos (managed by the photo-upload endpoint),
@@ -57,7 +62,75 @@ async function updateMe(req, res) {
     return res.json(profile);
 }
 
+// POST /profile/photos
+// Multipart upload (field name "photo"). Streams the file to Cloudinary, then
+// appends { url, publicId, isPrimary } to the profile's photos array. The first
+// photo on a profile becomes primary automatically. Creates the profile if the
+// user hasn't set one up yet, mirroring PUT /profile/me's upsert behaviour.
+async function uploadPhoto(req, res) {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No photo uploaded (expected multipart field "photo")' });
+    }
+
+    let profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) {
+        profile = new Profile({ userId: req.userId });
+    }
+
+    if (profile.photos.length >= MAX_PHOTOS) {
+        return res.status(409).json({ error: `A profile can have at most ${MAX_PHOTOS} photos` });
+    }
+
+    // Upload before mutating the DB so a Cloudinary failure leaves no dangling
+    // row. CloudinaryError propagates to the central handler (mapped to 502).
+    const { url, publicId } = await uploadImage(req.file.buffer, `sabipesin/profiles/${req.userId}`);
+
+    profile.photos.push({
+        url,
+        publicId,
+        isPrimary: profile.photos.length === 0,
+    });
+    await profile.save();
+
+    return res.status(201).json(profile);
+}
+
+// DELETE /profile/photos/:photoId
+// Removes the photo subdocument (matched by its _id) and deletes the backing
+// Cloudinary asset. If the removed photo was primary, the first remaining photo
+// is promoted so a profile with photos always has exactly one primary.
+async function deletePhoto(req, res) {
+    const profile = await Profile.findOne({ userId: req.userId });
+    if (!profile) {
+        return res.status(404).json({ error: 'Profile not found' });
+    }
+
+    const photo = profile.photos.id(req.params.photoId);
+    if (!photo) {
+        return res.status(404).json({ error: 'Photo not found' });
+    }
+
+    const wasPrimary = photo.isPrimary;
+
+    // Delete the asset first; a Cloudinary failure (502) aborts before we touch
+    // the DB, so the row and asset never drift out of sync. A "not found" asset
+    // is treated as success by the service, so re-deletes still clean up the row.
+    if (photo.publicId) {
+        await deleteImage(photo.publicId);
+    }
+
+    profile.photos.pull(photo._id);
+    if (wasPrimary && profile.photos.length > 0) {
+        profile.photos[0].isPrimary = true;
+    }
+    await profile.save();
+
+    return res.json(profile);
+}
+
 module.exports = {
     getMe,
     updateMe,
+    uploadPhoto,
+    deletePhoto,
 };

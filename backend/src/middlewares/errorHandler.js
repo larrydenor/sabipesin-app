@@ -20,6 +20,22 @@ function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-va
         return res.status(502).json({ error: 'Could not send verification code, please try again' });
     }
 
+    // Multer rejected the upload (too large, wrong field, non-image) — client error.
+    if (err.name === 'MulterError') {
+        const messages = {
+            LIMIT_FILE_SIZE: 'Photo exceeds the 5MB size limit',
+            LIMIT_UNEXPECTED_FILE: 'Unexpected file — send a single image in the "photo" field',
+            LIMIT_FILE_COUNT: 'Only one photo can be uploaded at a time',
+        };
+        return res.status(400).json({ error: messages[err.code] || 'Invalid file upload' });
+    }
+
+    // Cloudinary (photo storage) failure — matched by name to stay decoupled.
+    if (err.name === 'CloudinaryError') {
+        console.error('Cloudinary error:', err.message, err.cause || '');
+        return res.status(502).json({ error: 'Photo storage is unavailable, please try again' });
+    }
+
     // Mongoose validation / cast failures are client errors.
     if (err.name === 'ValidationError' || err.name === 'CastError') {
         return res.status(400).json({ error: err.message });
