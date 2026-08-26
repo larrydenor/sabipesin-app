@@ -235,3 +235,87 @@ cleaned up):
   `otherUser`, and `viewerVerificationTier` reflects whoever is fetching (`'nin'`).
 - Foreign match (requester not a participant) → `404`; non-existent id → `404`;
   malformed (non-ObjectId) id → `404` (not a `500` cast error).
+
+---
+
+## Messaging data layer — `GET /conversations`, `GET /conversations/:id/messages`
+
+**Built:** Phase 5's data layer and its two read endpoints (spec §3, §6). The
+`Conversation` and `Message` models, plus listing a user's conversations and
+paginating one conversation's messages. **Socket.IO and the anti-scam keyword
+flagging are deliberately NOT in this slice** — only the models and the two read
+endpoints. The `flagged` field exists now so the schema is stable before that
+filter lands (spec §8.5).
+
+**Models:**
+- `Conversation` — `matchId` (ref `Match`, **unique** — one conversation per
+  match), `participants: [ObjectId ref User]`, `lastMessageAt` (defaults to
+  creation time; bumped per message later), plus `timestamps`. Index on
+  `participants` for the "my conversations" membership query. `participants` is
+  denormalised from the match so listing is one indexed query, no join back
+  through `Match`.
+- `Message` — `conversationId` (ref `Conversation`, indexed), `senderId`
+  (ref `User`), `text: String`, `flagged: Boolean` (**default `false`** — the
+  anti-scam filter will set `true` later), `readAt: Date` (**default `null`** —
+  set by the future `read` event; nothing writes it yet), plus `timestamps`.
+  Compound index `(conversationId, createdAt: -1)` serves the filter + newest-first
+  sort in one.
+
+**`GET /conversations`** — authenticated. Returns
+`{ viewerVerificationTier, conversations: [...] }`, sorted by `lastMessageAt`
+newest-first. Each entry: `{ id, matchId, lastMessageAt, otherUser: { id,
+verificationTier, profile } }`. Mirrors `GET /matches`: the other participant is
+resolved with their derived `verificationTier` (spec §4.7 — the chat screen shows
+the badge, always present even when `null`) and public profile
+(`discoverySettings` stripped); users and profiles are batch-loaded (`$in`) and
+indexed by id for O(1) assembly.
+
+**`GET /conversations/:id/messages`** — authenticated, **paginated**
+(`?page`/`?limit`, `page` 1-based; `limit` defaults to 30, capped at 100).
+Returns `{ page, limit, hasMore, messages: [...] }` with messages **newest-first**
+(`createdAt: -1, _id: -1` tiebreak), each shaped as `{ id, conversationId,
+senderId, text, flagged, readAt, createdAt }`. `hasMore` is computed by fetching
+`limit + 1` rows (no second count query), same trick as discovery. The lookup is
+**scoped to the requester** (`_id: id` AND `participants: me`), so a conversation
+that doesn't exist *or* isn't one the requester participates in both return
+**`404`** — deliberately indistinguishable, so the endpoint can't probe whether an
+arbitrary conversation id exists (same posture as `GET /matches/:id`). A malformed
+(non-ObjectId) `:id` also `404`s rather than surfacing a cast error. Pure read —
+nothing sets `readAt` here.
+
+**New files:**
+- `src/models/Conversation.js`, `src/models/Message.js`
+- `src/controllers/ConversationController.js`
+
+**Deviations from spec:**
+- Pagination shape (`page`/`limit`/`hasMore`) and the message `limit` default of 30
+  / cap of 100 are not specified — sensible defaults, consistent with discovery.
+- `GET /conversations` enriches each row with the other participant's
+  `verificationTier` + public profile (a privacy-stripped, §4.7-consistent
+  convenience for rendering the chat list) rather than returning the raw
+  `participants` id array; not spec-mandated.
+- Added an index on `Conversation.participants` (not in the spec) to back the
+  membership query.
+
+**Verification:** Smoke-tested end-to-end against live MongoDB (25 assertions, all
+passing) via the real controllers with mock req/res, temp data cleaned up after.
+Seed: 4 users (A phone-verified, B NIN-verified, C an outsider, D), two of A's
+conversations (A-B and A-D) off real matches, and 5 messages in A-B with distinct
+`createdAt`s (one `flagged`).
+- `GET /conversations` (as A): returns both conversations sorted by
+  `lastMessageAt` desc; the other participant is resolved (B, not self) with
+  `verificationTier: 'nin'` and profile included, `discoverySettings` **stripped**;
+  `viewerVerificationTier: 'phone'`. Outsider C sees an empty list.
+- `GET /conversations/:id/messages` **404 scoping** — non-participant C → `404`
+  (the key test), valid-but-non-existent id → `404`, malformed (non-ObjectId)
+  id → `404` (not a `500` cast error).
+- `GET /conversations/:id/messages` **pagination** — with `limit=2`: page 1 =
+  `msg-4,msg-3` (newest-first) `hasMore: true`, page 2 = `msg-2,msg-1`
+  `hasMore: true`, page 3 = `msg-0` `hasMore: false` (no overflow row); no overlap
+  across pages. `flagged: true` round-trips on `msg-2`; message shape carries
+  `flagged`/`readAt`/`createdAt`/`senderId`. Participant B reads all 5 at the
+  default limit; the empty conversation A-D → `200` with 0 messages,
+  `hasMore: false`.
+
+Schema shapes were also asserted directly: `Message.flagged` defaults to `false`,
+`Message.readAt` to `null`, `Conversation.matchId` is `unique`.

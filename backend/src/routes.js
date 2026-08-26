@@ -6,6 +6,7 @@ const ProfileController = require('./controllers/ProfileController');
 const SwipeController = require('./controllers/SwipeController');
 const DiscoveryController = require('./controllers/DiscoveryController');
 const MatchController = require('./controllers/MatchController');
+const ConversationController = require('./controllers/ConversationController');
 const authMiddleware = require('./middlewares/auth');
 const asyncHandler = require('./utils/asyncHandler');
 
@@ -60,5 +61,11 @@ routes.get('/discovery', auth, asyncHandler(DiscoveryController.getDiscovery));
 // (§4.7 — never hidden); the detail route 404s for a missing or foreign match.
 routes.get('/matches', auth, asyncHandler(MatchController.listMatches));
 routes.get('/matches/:id', auth, asyncHandler(MatchController.getMatch));
+
+// Messaging read layer (spec §6). Lists the requester's conversations and, for a
+// single conversation they participate in, its paginated messages. Socket.IO and
+// the anti-scam keyword flagging (spec §8.5) arrive in a later slice of Phase 5.
+routes.get('/conversations', auth, asyncHandler(ConversationController.listConversations));
+routes.get('/conversations/:id/messages', auth, asyncHandler(ConversationController.listMessages));
 
 module.exports = routes;
