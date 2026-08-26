@@ -142,3 +142,96 @@ after the run:
   surviving match. (`findOneAndUpdate`+upsert resolves the pair server-side and
   rarely surfaces `11000` on its own, so the invariant and the recovery path were
   verified separately.)
+
+---
+
+## Discovery & match listing — `GET /discovery`, `GET /matches`
+
+**Built:** The two read endpoints that complete Phase 4's discovery slice.
+`GET /discovery` returns paginated candidate profiles; `GET /matches` returns the
+requester's active matches with each participant's verification tier.
+
+**`GET /discovery`** — authenticated. Query: `page` (1-based, default 1), `limit`
+(default 20, max 50). Returns `{ page, limit, hasMore, candidates: [...] }`.
+Filters applied, all server-side:
+- **Excludes self** and **every already-swiped user** — any `Swipe` row from the
+  requester (like, pass, *or* superlike), via `Swipe...distinct('targetId')`.
+- **Verification filter (spec §4.6):** if the requester's own
+  `discoverySettings.showOnlyNinVerified` is `true`, only candidates with
+  `ninVerifiedAt` set; otherwise anyone with at least `phoneVerifiedAt` set.
+  Incomplete signups (neither timestamp) never appear. Suspended/banned users are
+  excluded (`user.status: 'active'`).
+- **Geo-distance (spec §4.6):** only when *both* sides have a location. If the
+  requester has a location, candidates must be within their `maxDistanceKm`
+  (default 25) **or** have no location of their own; candidates with a location
+  beyond the radius are dropped. If the requester has no location, no distance
+  filter is applied. Implemented with `$geoWithin`/`$centerSphere` (radius =
+  `km / 6378.1` radians) inside an `$or` — `$near` can't be used in `$or` and would
+  wrongly drop locationless candidates.
+- Each candidate is returned with a small `user` summary
+  (`{ id, verificationTier, phoneVerifiedAt, ninVerifiedAt }`) for the badge, and
+  the candidate's own private `discoverySettings` are **stripped**.
+- Implemented as a single `Profile.aggregate` (`$match` → `$lookup` users →
+  `$unwind` → `$match` verification/status → `$sort` → `$skip`/`$limit`) so the
+  cross-collection verification filter paginates correctly in one query.
+  `hasMore` is computed by fetching `limit + 1` rows (no second count query).
+
+**`GET /matches`** — authenticated. Returns
+`{ viewerVerificationTier, matches: [...] }`, newest first, `status: 'active'`
+only. Each match: `{ id, matchedAt, status, otherUser: { id, verificationTier,
+profile } }`. Per **spec §4.7**, the derived `verificationTier` is always present
+(even when `null`) for both the other participant *and* the viewer — never hidden.
+The other user's profile is included (with their `discoverySettings` stripped).
+Users are loaded hydrated so the model's `verificationTier` virtual runs; users
+and profiles are batch-loaded (`$in`) and indexed by id for assembly.
+
+**`GET /matches/:id`** — authenticated. Returns `{ viewerVerificationTier, match }`
+where `match` is the same shape as one entry of `GET /matches` (other
+participant's `verificationTier` included, §4.7, plus the viewer's own tier). The
+lookup is **scoped to the requester** (`_id: id` AND `userA/userB` is the
+requester), so a match that doesn't exist *or* isn't one of the requester's both
+return **`404`** — deliberately indistinguishable, so the endpoint can't be used
+to probe whether an arbitrary match id exists. A malformed (non-ObjectId) `:id`
+also `404`s rather than surfacing a cast error. Unlike the list, the detail route
+is **not** restricted to `status: 'active'` — a participant can still read a match
+that was later `unmatched` (its `status` is in the payload). The list-shaping
+logic is shared with `GET /matches` via an internal `shapeMatch` helper.
+
+**New files:**
+- `src/controllers/DiscoveryController.js`, `src/controllers/MatchController.js`
+- `src/utils/verificationTier.js` — derives the tier from a plain object (the
+  aggregation results aren't hydrated docs, so the model virtual can't run there).
+  Mirrors the `User.verificationTier` virtual; both cite spec §3/§4.7.
+
+**Deviations from spec:**
+- Pagination shape (`page`/`limit`/`hasMore`) and the `limit` cap of 50 are not
+  specified — sensible defaults.
+- Candidate/other-user `discoverySettings` are stripped from responses (a privacy
+  choice, not spec-mandated).
+- `GET /matches/:id` returns a match in any `status` (including `unmatched`) as
+  long as it belongs to the requester; the spec doesn't state a status filter for
+  the detail route, and hiding an unmatched match behind a `404` would be
+  surprising for a direct fetch.
+
+**Verification:** Smoke-tested end-to-end against live MongoDB (25 assertions, all
+passing) via the real controllers with mock req/res, temp data cleaned up after:
+- Default discovery includes phone- and NIN-verified near candidates and a
+  no-location candidate; excludes the far candidate (>25km), the unverified user,
+  the suspended user, the already-swiped user, and self; strips `discoverySettings`
+  and carries each candidate's `verificationTier`.
+- `showOnlyNinVerified: true` narrows results to NIN-verified candidates only.
+- A requester with **no location** sees the far candidate (distance filter skipped).
+- `limit=2` returns 2 with `hasMore: true` and echoes `page`/`limit`.
+- `GET /matches` lists one active match with `otherUser.verificationTier: 'nin'`,
+  the other user's profile (discoverySettings stripped), and
+  `viewerVerificationTier: 'phone'`; an `unmatched` match is not listed.
+
+Separately smoke-tested `GET /matches/:id` (12 assertions, all passing, temp data
+cleaned up):
+- Own match → `200` with the requested match, the other participant as `otherUser`,
+  their `verificationTier: 'nin'`, profile included (discoverySettings stripped),
+  and `viewerVerificationTier: 'phone'`.
+- Symmetry: the other participant fetching the same match sees the first user as
+  `otherUser`, and `viewerVerificationTier` reflects whoever is fetching (`'nin'`).
+- Foreign match (requester not a participant) → `404`; non-existent id → `404`;
+  malformed (non-ObjectId) id → `404` (not a `500` cast error).

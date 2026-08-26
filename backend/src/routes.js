@@ -4,6 +4,8 @@ const multer = require('multer');
 const AuthController = require('./controllers/AuthController');
 const ProfileController = require('./controllers/ProfileController');
 const SwipeController = require('./controllers/SwipeController');
+const DiscoveryController = require('./controllers/DiscoveryController');
+const MatchController = require('./controllers/MatchController');
 const authMiddleware = require('./middlewares/auth');
 const asyncHandler = require('./utils/asyncHandler');
 
@@ -46,7 +48,17 @@ routes.delete('/profile/photos/:photoId', auth, asyncHandler(ProfileController.d
 routes.put('/profile/discovery-settings', auth, asyncHandler(ProfileController.updateDiscoverySettings));
 
 // Swipe + match creation (spec §6). Records a swipe and forms a Match on a mutual
-// like/superlike. GET /discovery and GET /matches are deferred to a later step.
+// like/superlike.
 routes.post('/swipes', auth, asyncHandler(SwipeController.createSwipe));
+
+// Discovery (spec §6, §4.6). Paginated candidate profiles: excludes self and
+// already-swiped users, applies the NIN/phone verification filter and geo-distance.
+routes.get('/discovery', auth, asyncHandler(DiscoveryController.getDiscovery));
+
+// Match listing + detail (spec §6). The requester's active matches, and a single
+// match by id. Both include the other participant's derived verificationTier
+// (§4.7 — never hidden); the detail route 404s for a missing or foreign match.
+routes.get('/matches', auth, asyncHandler(MatchController.listMatches));
+routes.get('/matches/:id', auth, asyncHandler(MatchController.getMatch));
 
 module.exports = routes;
