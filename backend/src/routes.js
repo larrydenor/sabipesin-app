@@ -40,4 +40,8 @@ routes.put('/profile/me', auth, asyncHandler(ProfileController.updateMe));
 routes.post('/profile/photos', auth, upload.single('photo'), asyncHandler(ProfileController.uploadPhoto));
 routes.delete('/profile/photos/:photoId', auth, asyncHandler(ProfileController.deletePhoto));
 
+// Discovery settings (spec §6). Enforces the NIN reciprocity rule (§4.5) — the
+// one write path allowed to set showOnlyNinVerified.
+routes.put('/profile/discovery-settings', auth, asyncHandler(ProfileController.updateDiscoverySettings));
+
 module.exports = routes;
