@@ -42,8 +42,13 @@ const ProfileSchema = new Schema({
         type: PointSchema,
         default: undefined,
     },
+    // Managed by POST/DELETE /profile/photos (Cloudinary). Each subdoc gets an
+    // auto _id which is the :photoId used by DELETE. publicId is stored in
+    // addition to the spec's { url, isPrimary } so the delete endpoint can remove
+    // the actual Cloudinary asset (not just the DB reference) and avoid orphans.
     photos: [{
         url: { type: String },
+        publicId: { type: String },
         isPrimary: { type: Boolean },
     }],
     prompts: [{
