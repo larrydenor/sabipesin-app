@@ -128,9 +128,73 @@ async function deletePhoto(req, res) {
     return res.json(profile);
 }
 
+// PUT /profile/discovery-settings
+// Enforces the reciprocity rule (spec §4.5): a user may only enable
+// showOnlyNinVerified if they are themselves NIN-verified. This is the endpoint
+// PUT /profile/me is deliberately blocked from writing to, so the rule cannot be
+// bypassed. Accepts showOnlyNinVerified, maxDistanceKm, ageRange and applies
+// only the fields provided (dot-path $set preserves the others).
+async function updateDiscoverySettings(req, res) {
+    const { showOnlyNinVerified, maxDistanceKm, ageRange } = req.body;
+    const set = {};
+
+    if (showOnlyNinVerified !== undefined) {
+        if (typeof showOnlyNinVerified !== 'boolean') {
+            return res.status(400).json({ error: 'showOnlyNinVerified must be a boolean' });
+        }
+        // Reciprocity: enabling the NIN-only filter requires the requester to be
+        // NIN-verified themselves. Reject with a specific code the client routes
+        // straight into the NIN verification flow — and do NOT persist anything.
+        if (showOnlyNinVerified === true && !req.user.ninVerifiedAt) {
+            return res.status(403).json({
+                error: 'You must complete NIN verification before filtering by NIN-verified users',
+                code: 'NIN_REQUIRED',
+            });
+        }
+        set['discoverySettings.showOnlyNinVerified'] = showOnlyNinVerified;
+    }
+
+    if (maxDistanceKm !== undefined) {
+        if (typeof maxDistanceKm !== 'number' || !Number.isFinite(maxDistanceKm) || maxDistanceKm <= 0) {
+            return res.status(400).json({ error: 'maxDistanceKm must be a positive number' });
+        }
+        set['discoverySettings.maxDistanceKm'] = maxDistanceKm;
+    }
+
+    if (ageRange !== undefined) {
+        const validNum = (n) => typeof n === 'number' && Number.isFinite(n);
+        const min = ageRange && ageRange.min;
+        const max = ageRange && ageRange.max;
+        if (!ageRange || !validNum(min) || !validNum(max)) {
+            return res.status(400).json({ error: 'ageRange must be { min, max } numbers' });
+        }
+        // 18+ floor: this is a dating app; not in the spec but a safety baseline.
+        if (min < 18) {
+            return res.status(400).json({ error: 'ageRange.min must be at least 18' });
+        }
+        if (min > max) {
+            return res.status(400).json({ error: 'ageRange.min cannot exceed ageRange.max' });
+        }
+        set['discoverySettings.ageRange'] = { min, max };
+    }
+
+    if (Object.keys(set).length === 0) {
+        return res.status(400).json({ error: 'No valid discovery settings provided' });
+    }
+
+    // Upsert so the profile is created on first call, mirroring PUT /profile/me.
+    const profile = await Profile.findOneAndUpdate(
+        { userId: req.userId },
+        { $set: set, $setOnInsert: { userId: req.userId } },
+        { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
+    );
+    return res.json(profile);
+}
+
 module.exports = {
     getMe,
     updateMe,
     uploadPhoto,
     deletePhoto,
+    updateDiscoverySettings,
 };
