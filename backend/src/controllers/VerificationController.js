@@ -62,6 +62,38 @@ async function startNin(req, res) {
     });
 }
 
+// GET /verification/status
+// Read-only snapshot of the authenticated user's verification state (spec §6).
+// Returns the two verification timestamps and the derived tier
+// (`ninVerifiedAt ? 'nin' : phoneVerifiedAt ? 'phone' : null` — §3, §4.7, the
+// User.verificationTier virtual). No QoreID call — this only reads what earlier
+// slices (phone OTP verify, the NIN start/webhook) have already persisted.
+async function getStatus(req, res) {
+    // Surface the in-flight NIN attempt, if any, so the client can show "pending"
+    // and when the session lapses. There's at most one live session per user
+    // (startNin supersedes older pending rows), but sort by newest to be safe.
+    const pending = await Verification.findOne({
+        userId: req.userId,
+        type: 'nin_selfie',
+        status: 'pending',
+    })
+        .sort({ createdAt: -1 })
+        .select('status expiresAt')
+        .lean();
+
+    return res.json({
+        phoneVerifiedAt: req.user.phoneVerifiedAt,
+        ninVerifiedAt: req.user.ninVerifiedAt,
+        verificationTier: req.user.verificationTier,
+        // null when there's no in-flight NIN verification; otherwise the pending
+        // row's status and expiry (spec §6).
+        pendingNinVerification: pending
+            ? { status: pending.status, expiresAt: pending.expiresAt }
+            : null,
+    });
+}
+
 module.exports = {
     startNin,
+    getStatus,
 };
