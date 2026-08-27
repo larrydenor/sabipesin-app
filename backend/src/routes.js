@@ -42,6 +42,11 @@ routes.post('/auth/otp/verify', asyncHandler(AuthController.verifyOtp));
 // vendor webhook that sets ninVerifiedAt is a later slice of Phase 5.
 routes.post('/verification/nin/start', auth, asyncHandler(VerificationController.startNin));
 
+// Verification status (spec §6). Authenticated, read-only: returns the caller's
+// phone/NIN verification timestamps, the derived verificationTier, and any
+// in-flight NIN verification's status + expiry. No QoreID call.
+routes.get('/verification/status', auth, asyncHandler(VerificationController.getStatus));
+
 // Profile CRUD (spec §6). Authenticated; a user only ever reads/writes their
 // own profile. Photo upload and discovery-settings are separate endpoints.
 routes.get('/profile/me', auth, asyncHandler(ProfileController.getMe));

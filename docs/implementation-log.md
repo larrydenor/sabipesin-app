@@ -476,3 +476,49 @@ deliberately not built here.
 - `routes.js` loads and registers `POST /verification/nin/start`.
 Full request-path (auth → pending row written → 409-when-verified) not yet
 smoke-tested against live MongoDB — worth a run alongside the webhook slice.
+
+## Verification status — `GET /verification/status`
+
+**Built:** The read-only status endpoint (spec §6). Returns the authenticated
+user's current verification state; makes **no QoreID call** — it only reads what
+the phone-OTP verify and the NIN start/webhook slices have already persisted.
+
+- `GET /verification/status` — authenticated, no body. Response:
+  ```json
+  { "phoneVerifiedAt": "...", "ninVerifiedAt": null,
+    "verificationTier": "phone",
+    "pendingNinVerification": { "status": "pending", "expiresAt": "..." } }
+  ```
+  - `phoneVerifiedAt` / `ninVerifiedAt` come straight off the authenticated
+    `User` (loaded by the auth middleware).
+  - `verificationTier` is the derived value (`ninVerifiedAt ? 'nin' :
+    phoneVerifiedAt ? 'phone' : null`), read from the `User.verificationTier`
+    virtual (spec §3, §4.7) — never stored.
+  - `pendingNinVerification` is the newest `pending` `nin_selfie` `Verification`
+    row's `status` + `expiresAt`, or `null` when there's no in-flight attempt.
+    `startNin` supersedes older pending rows so there's at most one, but the query
+    sorts by newest `createdAt` defensively and `.select`s only the two fields.
+
+- `src/controllers/VerificationController.js` — added `getStatus`.
+- `routes.js` — registered `GET /verification/status` (authenticated).
+
+**Deviations from / additions to spec:**
+- The spec (§6) names the route but not the response shape. The three top-level
+  fields are spec-named (§6); `pendingNinVerification` is nested (rather than
+  flattened) so the two Verification-row fields are clearly grouped and the key is
+  simply `null` when nothing is in flight.
+
+**Verification:** Live smoke test against real MongoDB (server on `:3333`, four
+seeded users, real minted access tokens, actual HTTP `GET /verification/status`,
+test data cleaned up afterwards). All four branches returned `HTTP 200`:
+
+| Case | verificationTier | ninVerifiedAt | pendingNinVerification |
+| --- | --- | --- | --- |
+| phone-only verified | `phone` | `null` | `null` |
+| NIN verified | `nin` | set | `null` |
+| pending NIN in flight | `phone` | `null` | `{ status: 'pending', expiresAt }` |
+| no pending NIN | `phone` | `null` | `null` |
+
+The read path reuses the auth middleware's already-loaded `User` (so
+`phoneVerifiedAt`/`ninVerifiedAt`/`verificationTier` need no extra query) plus a
+single lean, projected `Verification.findOne`.
