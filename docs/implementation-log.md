@@ -522,3 +522,67 @@ test data cleaned up afterwards). All four branches returned `HTTP 200`:
 The read path reuses the auth middleware's already-loaded `User` (so
 `phoneVerifiedAt`/`ninVerifiedAt`/`verificationTier` need no extra query) plus a
 single lean, projected `Verification.findOne`.
+
+
+## Phase 6 (payments) — Subscription & Transaction models + `GET /subscriptions/me`
+
+**Built:** The data layer for payments (spec §3, §7) and the single read
+endpoint that exposes a user's plan. **No** Paystack/StoreKit integration,
+payment initialization, verify, or webhook in this slice — deliberately just the
+models and the read path.
+
+- `src/models/Subscription.js` — one row per user (`userId` unique). Fields per
+  spec §3: `plan` (`free`/`unlimited`, default `free`), `status`
+  (`active`/`cancelled`/`expired`, default `active`), `paymentPlatform`
+  (`ios_iap`/`paystack`), `paystackSubscriptionCode`, `iosOriginalTransactionId`,
+  `currentPeriodEnd`. `timestamps: true` supplies `createdAt`/`updatedAt`.
+- `src/models/Transaction.js` — one-off purchases (many rows per user). Fields
+  per spec §3: `type` (`boost`/`superlike`, required), `paymentPlatform`,
+  `amountKobo`, `paystackReference` (**unique + sparse**), `iosTransactionId`
+  (**unique + sparse**), `status` (`pending`/`success`/`failed`, default
+  `pending`). Sparse is load-bearing: the many rows without a reference for a
+  given platform must not collide on `null` under the unique index.
+- `src/controllers/SubscriptionController.js` — `getMe`. Reads the caller's
+  Subscription (lean, projected to `plan status paymentPlatform
+  currentPeriodEnd`) and returns it; when there's **no row**, returns the free
+  default (`plan: 'free'`, `status: 'active'`, `paymentPlatform: null`,
+  `currentPeriodEnd: null`). No free-tier row is written on signup — absence
+  *is* the free state.
+- `routes.js` — registered `GET /subscriptions/me` (authenticated).
+
+**Response shape (`GET /subscriptions/me`):**
+```json
+{ "plan": "free", "status": "active",
+  "paymentPlatform": null, "currentPeriodEnd": null }
+```
+
+**Deviations from / additions to spec:**
+- The spec (§6) names the route but not the response shape; the four returned
+  fields are all spec §3 Subscription fields. The default-when-absent behaviour
+  (free plan, no row written) was called out in the task and matches §7's model
+  where a user is on the free tier until they actively subscribe.
+- For a defaulted (no-row) response, `status: 'active'` means "the free tier is
+  in effect," not a paid subscription — it mirrors the schema default so a
+  defaulted response and a real free-tier row read identically.
+
+**Verification:** Module smoke-load with `.env` present — Subscription,
+Transaction, SubscriptionController, and routes.js all require cleanly and the
+route registers. Index dump confirmed: `Subscription { userId: 1 } unique`;
+`Transaction { paystackReference: 1 } unique+sparse` and `{ iosTransactionId: 1 }
+unique+sparse`.
+
+Live request-path smoke test against real MongoDB (throwaway harness booting the
+real `routes.js` on port `3339`, two seeded users, real minted access tokens,
+actual HTTP `GET /subscriptions/me`, all seeded docs deleted afterwards —
+confirmed 0 leftover). Both cases returned `HTTP 200`:
+
+| Case | Seeded state | Response body |
+| --- | --- | --- |
+| default (no Subscription row) | user only, no sub | `{ plan: 'free', status: 'active', paymentPlatform: null, currentPeriodEnd: null }` |
+| real non-free row | `plan: unlimited`, `status: active`, `paymentPlatform: paystack`, `paystackSubscriptionCode`, `currentPeriodEnd: 2026-12-31` | `{ plan: 'unlimited', status: 'active', paymentPlatform: 'paystack', currentPeriodEnd: '2026-12-31T00:00:00.000Z' }` |
+
+This proves the endpoint reads real persisted data (the unlimited/paystack row
+round-trips field-for-field) and does **not** always fall back to the free
+default — the two cases return distinct bodies. `paystackSubscriptionCode` is
+stored but intentionally not projected into the response (only the four §3
+plan-state fields are returned).
