@@ -737,3 +737,66 @@ delivery of the same charge → `200`, still exactly one row, and
 `currentPeriodEnd` unchanged (idempotent — no double-extension); (T5) a
 `charge.failed` event → `200` with no Subscription created. Test rows cleaned up
 afterward.
+
+---
+
+## One-off purchases (Paystack) — `POST /purchases/boost/paystack`, `POST /purchases/superlike/paystack`
+
+**Built:** The Paystack (Android/web) path for one-off purchases — profile boost
+and super like (spec §6) — plus the webhook branch that settles them.
+
+- **`POST /purchases/boost/paystack`** and **`POST /purchases/superlike/paystack`**
+  — authenticated. Both share one controller helper and differ only in `type` and
+  price. Each initializes a one-off Paystack transaction, then persists a
+  **`pending`** `Transaction` (`type` `'boost'|'superlike'`, `paymentPlatform:
+  'paystack'`, `amountKobo`, `paystackReference` = our reference) and returns
+  `201 { message, authorizationUrl, accessCode, reference }`. Nothing is *granted*
+  here — the row flips to `success` only via the signature-verified webhook (spec
+  §5 — never trust a client-reported purchase). The `pending` row is written
+  **after** a successful init, so a failed init (→ 502) leaves no orphan row.
+- **`POST /payments/webhook/paystack`** (extended) — on `charge.success` it now
+  **routes on the metadata `type`**: a `'boost'|'superlike'` charge settles the
+  matching `Transaction`; anything else is the subscription flow and activates the
+  `Subscription` (unchanged). Exactly one branch owns Transaction-vs-Subscription.
+
+**New service function** (`src/services/paystack.js`): `initializeOneOffTransaction
+({ email, amount, reference, metadata })` — a generic one-off charge (never
+attaches a `plan`; caller supplies the exact kobo amount). The shared HTTP call +
+error mapping + success-envelope validation were extracted into a private
+`initializeTransaction(payload)` helper that both `initializeSubscriptionTransaction`
+and `initializeOneOffTransaction` call, so there's no duplicated axios/validation.
+
+**New files:** `src/controllers/PurchasesController.js`.
+
+**Idempotency (same approach as the subscription webhook):** the charge
+`reference` is the idempotency key. The settle is a single atomic
+`Transaction.findOneAndUpdate({ paystackReference: reference, status: 'pending' },
+{ $set: { status: 'success' } })`. A duplicate delivery of an already-settled
+charge (or an unknown reference) matches the `status: 'pending'` filter on nothing
+→ harmless no-op; concurrent duplicate deliveries can't both win. (An
+update-only, not upsert: the `pending` row is always created at init, before the
+payer can complete checkout, so the webhook is guaranteed a row to match.)
+
+**Deviations from / additions to spec:**
+- **Route paths** use the spec §6 route-table form with the `/paystack` suffix
+  (`/purchases/boost/paystack`, `/purchases/superlike/paystack`) — consistent with
+  the existing `/subscriptions/subscribe/paystack` and leaving room for the
+  `/purchases/{type}/ios/verify` StoreKit counterparts (§6, later slice).
+- **New env `PAYSTACK_BOOST_AMOUNT_KOBO` / `PAYSTACK_SUPERLIKE_AMOUNT_KOBO`**
+  (placeholders ₦1,500 / ₦500) — boost/super-like pricing is still open (spec §9),
+  mirroring the `PAYSTACK_UNLIMITED_AMOUNT_KOBO` placeholder pattern.
+- **Genericized the Paystack `502` message** ("Could not start the payment…") since
+  it now also covers purchase inits, not just the subscription.
+
+**Verification:** Genuine live test — real Express app (with raw-body capture) +
+real MongoDB + real Paystack **test** API for both init calls, correctly-signed
+webhooks (throwaway harness, since removed). 19/19 assertions passed: (T1) boost
+init → `201` with `authorizationUrl` and a `pending` boost Transaction at
+₦1,500/kobo; (T2) super like init → `201` with a `pending` superlike Transaction
+at ₦500/kobo; (T3) a boost `charge.success` → `200`, boost Transaction now
+`success`, and **no Subscription row created**; (T4) a superlike `charge.success`
+→ Transaction `success`; (T5) a duplicate boost delivery → `200`, still exactly
+one Transaction, still `success` (idempotent); (T6) a subscription
+`charge.success` (no `type`) → `200`, a `Subscription` row is activated and **no
+new Transaction created** (webhook routes correctly); (T7) a forged signature →
+`401`. Test rows cleaned up afterward.
