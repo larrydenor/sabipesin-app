@@ -70,33 +70,12 @@ function authHeader() {
     return `Bearer ${PAYSTACK_SECRET_KEY}`;
 }
 
-// Initializes a Paystack transaction for the Unlimited subscription.
-//   email     — the customer's email (Paystack requires one; see the controller
-//               for how we source it from a phone-only account)
-//   reference — our own idempotent transaction reference, carried through so the
-//               webhook can reconcile the charge back to this attempt
-//   metadata  — arbitrary object echoed back on the webhook (we pass userId/plan)
-// Resolves to { authorizationUrl, accessCode, reference, amount, plan, raw }.
-// `authorizationUrl` is the only value the client strictly needs to continue.
-async function initializeSubscriptionTransaction({ email, reference, metadata } = {}) {
-    const amount = Number(PAYSTACK_UNLIMITED_AMOUNT_KOBO) || 500000;
-
-    const payload = {
-        email,
-        // Paystack ignores `amount` when a `plan` is supplied (it uses the plan's
-        // amount), but we always send it so the one-time-charge fallback works.
-        amount,
-        currency: 'NGN',
-        reference,
-        metadata,
-    };
-    if (PAYSTACK_UNLIMITED_PLAN_CODE) {
-        payload.plan = PAYSTACK_UNLIMITED_PLAN_CODE;
-    }
-    if (PAYSTACK_CALLBACK_URL) {
-        payload.callback_url = PAYSTACK_CALLBACK_URL;
-    }
-
+// Low-level POST {BASE}/transaction/initialize. Shared by every init path
+// (subscription and one-off purchases) so the HTTP call, error mapping, and
+// success-envelope validation live in exactly one place. Takes the fully-built
+// payload and resolves to Paystack's `data` object (the inner `data.data`), whose
+// `authorization_url` is guaranteed present on return.
+async function initializeTransaction(payload) {
     let data;
     try {
         ({ data } = await axios.post(
@@ -124,13 +103,85 @@ async function initializeSubscriptionTransaction({ email, reference, metadata } 
         throw new PaystackError((data && data.message) || 'Paystack did not return an authorization URL', { data });
     }
 
+    return data.data;
+}
+
+// Initializes a Paystack transaction for the Unlimited subscription.
+//   email     — the customer's email (Paystack requires one; see the controller
+//               for how we source it from a phone-only account)
+//   reference — our own idempotent transaction reference, carried through so the
+//               webhook can reconcile the charge back to this attempt
+//   metadata  — arbitrary object echoed back on the webhook (we pass userId/plan)
+// Resolves to { authorizationUrl, accessCode, reference, amount, plan, raw }.
+// `authorizationUrl` is the only value the client strictly needs to continue.
+async function initializeSubscriptionTransaction({ email, reference, metadata } = {}) {
+    const amount = Number(PAYSTACK_UNLIMITED_AMOUNT_KOBO) || 500000;
+
+    const payload = {
+        email,
+        // Paystack ignores `amount` when a `plan` is supplied (it uses the plan's
+        // amount), but we always send it so the one-time-charge fallback works.
+        amount,
+        currency: 'NGN',
+        reference,
+        metadata,
+    };
+    if (PAYSTACK_UNLIMITED_PLAN_CODE) {
+        payload.plan = PAYSTACK_UNLIMITED_PLAN_CODE;
+    }
+    if (PAYSTACK_CALLBACK_URL) {
+        payload.callback_url = PAYSTACK_CALLBACK_URL;
+    }
+
+    const result = await initializeTransaction(payload);
+
     return {
-        authorizationUrl: data.data.authorization_url,
-        accessCode: data.data.access_code,
-        reference: data.data.reference,
+        authorizationUrl: result.authorization_url,
+        accessCode: result.access_code,
+        reference: result.reference,
         amount,
         plan: PAYSTACK_UNLIMITED_PLAN_CODE || null,
-        raw: data.data,
+        raw: result,
+    };
+}
+
+// Initializes a Paystack transaction for a ONE-OFF charge — a profile boost or a
+// super like (spec §5, §6). Deliberately generic: unlike
+// initializeSubscriptionTransaction it never attaches a `plan` (there's no
+// recurring billing for a one-off) and the caller supplies the exact kobo amount,
+// so the same function serves boost, super like, and any future one-off product.
+//   email     — the customer's email (Paystack requires one; sourced from the
+//               phone-only account the same way the subscription path does)
+//   amount    — the charge amount in kobo (positive integer)
+//   reference — our own idempotent transaction reference, carried through and
+//               echoed back on the webhook so it maps to our pending Transaction
+//   metadata  — arbitrary object echoed back on the webhook (we pass userId/type)
+// Resolves to { authorizationUrl, accessCode, reference, amount, raw }.
+async function initializeOneOffTransaction({ email, amount, reference, metadata } = {}) {
+    const amountKobo = Number(amount);
+    if (!Number.isInteger(amountKobo) || amountKobo <= 0) {
+        throw new PaystackError('initializeOneOffTransaction requires a positive integer kobo amount');
+    }
+
+    const payload = {
+        email,
+        amount: amountKobo,
+        currency: 'NGN',
+        reference,
+        metadata,
+    };
+    if (PAYSTACK_CALLBACK_URL) {
+        payload.callback_url = PAYSTACK_CALLBACK_URL;
+    }
+
+    const result = await initializeTransaction(payload);
+
+    return {
+        authorizationUrl: result.authorization_url,
+        accessCode: result.access_code,
+        reference: result.reference,
+        amount: amountKobo,
+        raw: result,
     };
 }
 
@@ -170,6 +221,7 @@ function verifyWebhookSignature(rawBody, signature) {
 
 module.exports = {
     initializeSubscriptionTransaction,
+    initializeOneOffTransaction,
     verifyWebhookSignature,
     PaystackError,
 };

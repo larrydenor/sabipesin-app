@@ -1,4 +1,5 @@
 const Subscription = require('../models/Subscription');
+const Transaction = require('../models/Transaction');
 const paystack = require('../services/paystack');
 
 // Server-to-server payment webhooks (spec §5, §6). Unlike every other write
@@ -35,15 +36,35 @@ async function paystackWebhook(req, res) {
     const data = event.data || {};
     const metadata = data.metadata || {};
     // The mapping we planted at initialization (see SubscriptionController
-    // .subscribeWithPaystack). After signature verification this metadata is
-    // trustworthy — it's our own data, echoed back unmodified.
-    const { userId, paymentPlatform } = metadata;
+    // .subscribeWithPaystack and PurchasesController.startPaystackPurchase). After
+    // signature verification this metadata is trustworthy — it's our own data,
+    // echoed back unmodified.
+    const { userId, type, paymentPlatform } = metadata;
     const reference = data.reference;
 
-    // Guard against a charge we can't map to our subscription flow (missing
-    // metadata, or a charge from some other integration on this Paystack
-    // account). Ack with 200 so it isn't retried — there's nothing to act on.
+    // Guard against a charge we can't map to our own flows (missing metadata, or a
+    // charge from some other integration on this Paystack account). Ack with 200
+    // so it isn't retried — there's nothing to act on.
     if (!userId || paymentPlatform !== 'paystack' || !reference) {
+        return res.status(200).json({ received: true });
+    }
+
+    // Route on the metadata `type` we planted at init. A one-off purchase (boost /
+    // super like) carries a Transaction `type` and settles a Transaction row; a
+    // subscription checkout carries no `type` and activates the Subscription row.
+    // This is the only branch that decides Transaction-vs-Subscription.
+    if (type === 'boost' || type === 'superlike') {
+        // Flip the matching pending Transaction to success. Same idempotency shape
+        // as the subscription path, keyed on the charge reference: the filter also
+        // requires `status: 'pending'`, so a duplicate delivery of an
+        // already-settled charge (or an unknown reference) matches nothing and is a
+        // harmless no-op. The single atomic findOneAndUpdate means concurrent
+        // duplicate deliveries can't both win.
+        await Transaction.findOneAndUpdate(
+            { paystackReference: reference, status: 'pending' },
+            { $set: { status: 'success' } },
+        );
+
         return res.status(200).json({ received: true });
     }
 

@@ -31,7 +31,7 @@ function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-va
     // coupling this module to the service that defines PaystackError.
     if (err.name === 'PaystackError') {
         console.error('Paystack error:', err.message, err.data || '');
-        return res.status(502).json({ error: 'Could not start the subscription payment, please try again' });
+        return res.status(502).json({ error: 'Could not start the payment, please try again' });
     }
 
     // Multer rejected the upload (too large, wrong field, non-image) — client error.

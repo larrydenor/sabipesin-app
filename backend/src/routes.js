@@ -9,6 +9,7 @@ const MatchController = require('./controllers/MatchController');
 const ConversationController = require('./controllers/ConversationController');
 const VerificationController = require('./controllers/VerificationController');
 const SubscriptionController = require('./controllers/SubscriptionController');
+const PurchasesController = require('./controllers/PurchasesController');
 const PaymentsController = require('./controllers/PaymentsController');
 const authMiddleware = require('./middlewares/auth');
 const asyncHandler = require('./utils/asyncHandler');
@@ -94,13 +95,22 @@ routes.get('/subscriptions/me', auth, asyncHandler(SubscriptionController.getMe)
 // plan is activated only by the signature-verified Paystack webhook (later slice).
 routes.post('/subscriptions/subscribe/paystack', auth, asyncHandler(SubscriptionController.subscribeWithPaystack));
 
+// One-off purchase init — Paystack, Android/web path (spec §6, §5, §7).
+// Authenticated. Each initializes a one-off Paystack transaction, persists a
+// PENDING Transaction row keyed by our reference, and returns the authorization_url
+// the client redirects to. They grant nothing here — the purchase is settled to
+// `success` only by the signature-verified Paystack webhook below. (iOS
+// StoreKit verify counterparts, §6, are a later slice.)
+routes.post('/purchases/boost/paystack', auth, asyncHandler(PurchasesController.boostWithPaystack));
+routes.post('/purchases/superlike/paystack', auth, asyncHandler(PurchasesController.superlikeWithPaystack));
+
 // Paystack webhook (spec §5, §6, §7). Deliberately NOT behind `auth` — Paystack
 // calls this server-to-server, so there's no JWT. Trust is established inside the
 // handler by verifying the HMAC-SHA512 `x-paystack-signature` over the raw body
 // (captured in server.js); an unsigned/forged request gets 401. On a genuine
-// charge.success this is the only path that activates a paid Subscription, and
-// it's idempotent on the charge reference so Paystack's retries don't
-// double-activate or extend the period twice.
+// charge.success it either activates a paid Subscription or settles a one-off
+// Transaction (boost/super like) — routing on the metadata `type` — and it's
+// idempotent on the charge reference so Paystack's retries don't double-apply.
 routes.post('/payments/webhook/paystack', asyncHandler(PaymentsController.paystackWebhook));
 
 module.exports = routes;
