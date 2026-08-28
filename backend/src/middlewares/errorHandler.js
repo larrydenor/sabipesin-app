@@ -27,6 +27,13 @@ function errorHandler(err, req, res, next) { // eslint-disable-line no-unused-va
         return res.status(502).json({ error: 'Could not start NIN verification, please try again' });
     }
 
+    // Downstream payment provider (Paystack) failure — matched by name to avoid
+    // coupling this module to the service that defines PaystackError.
+    if (err.name === 'PaystackError') {
+        console.error('Paystack error:', err.message, err.data || '');
+        return res.status(502).json({ error: 'Could not start the subscription payment, please try again' });
+    }
+
     // Multer rejected the upload (too large, wrong field, non-image) — client error.
     if (err.name === 'MulterError') {
         const messages = {
