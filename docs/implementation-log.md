@@ -661,3 +661,79 @@ back verbatim — confirming the request is well-formed and the envelope parsing
 correct. Also smoke-loaded the controller, service, error handler, and
 `routes.js`: all require cleanly and the `POST /subscriptions/subscribe/paystack`
 route is registered.
+
+---
+
+## Phase 6 (payments) — Paystack webhook — `POST /payments/webhook/paystack`
+
+**Built:** The server-to-server callback that actually activates a paid plan
+(spec §5, §6, §7). This is the counterpart to the subscribe-init slice: init
+opens Paystack checkout and persists nothing; this webhook is the **only** path
+that writes a paid `Subscription` row, and only after verifying the request
+genuinely came from Paystack. On a signature-verified `charge.success` it
+creates-or-updates the user's single Subscription to `plan: 'unlimited', status:
+'active', paymentPlatform: 'paystack'`, sets `currentPeriodEnd` 30 days out, and
+records `paystackSubscriptionCode` when present. Idempotent against Paystack's
+retries so a redelivered charge never double-activates or double-extends.
+
+- `src/controllers/PaymentsController.js` (new) — `paystackWebhook`. New
+  controller because `/payments/webhook/*` is its own namespace distinct from the
+  authenticated `/subscriptions/*` endpoints, and it'll grow the Apple
+  (App Store Server Notifications v2) handler next. Flow: (1) verify signature →
+  `401` on failure, before trusting any field; (2) ignore every event type but
+  `charge.success`, acking `200` so Paystack stops retrying unhandled events;
+  (3) pull our planted `metadata` (`userId`, `paymentPlatform`) + `data.reference`
+  and bail to `200` if the charge can't be mapped to our flow; (4) idempotent
+  upsert of the Subscription row.
+- `src/services/paystack.js` — added `verifyWebhookSignature(rawBody, signature)`.
+  Recomputes `HMAC-SHA512(rawBody)` keyed by `PAYSTACK_SECRET_KEY` and
+  constant-time-compares (`crypto.timingSafeEqual`) against the
+  `x-paystack-signature` header. Returns `false` on any missing input or a
+  length/content mismatch. Lives in the service (not the controller) to keep the
+  secret-handling in one place, mirroring `initializeSubscriptionTransaction`.
+- `src/server.js` — `express.json({ verify })` now stashes the raw body bytes on
+  `req.rawBody`. The signature is computed over the exact bytes Paystack sent;
+  re-serializing the parsed object would change whitespace/key order and break
+  verification, so the buffer is captured before parsing discards it.
+- `src/models/Subscription.js` — added `paystackLastReference` (String): the
+  charge reference that last activated/renewed the row, used as the webhook's
+  idempotency key.
+- `src/routes.js` — registered `POST /payments/webhook/paystack`. **No `auth`
+  middleware** — Paystack has no JWT; trust comes from the signature check.
+
+**Idempotency (the subtle part):** the upsert filter is
+`{ userId, paystackLastReference: { $ne: reference } }`. A retry of an
+already-applied charge matches no document, so `upsert` attempts an INSERT and
+hits the unique `userId` index — that `E11000` collision *is* the idempotency
+signal (charge already applied), so it's caught and swallowed. This is what stops
+a retry from pushing `currentPeriodEnd` out another 30 days. A genuinely new
+checkout carries a new `reference`, matches the existing row (or inserts the
+first one), and legitimately renews. The whole apply is a single atomic
+`findOneAndUpdate`, so concurrent duplicate deliveries can't both win.
+
+**Response shape:** `200 { "received": true }` for anything accepted or
+intentionally ignored (so Paystack stops retrying); `401 { "error": "Invalid
+signature" }` for an unsigned/forged request.
+
+**Deviations from / additions to spec:**
+- **Route path** is `POST /payments/webhook/paystack` (spec §6), not the
+  `POST /payments/webhook` mentioned in the §5 prose — the §6 route table is the
+  canonical one and already splits Paystack vs. Apple.
+- **Fixed 30-day period** rather than a real recurring `next_payment_date`:
+  there's no dashboard Plan yet (spec §9 pricing is open). `currentPeriodEnd`
+  should switch to the subscription's `next_payment_date` once a `PLN_…` Plan
+  drives billing.
+- **New `paystackLastReference` field** on `Subscription` (not in the §3 model) —
+  needed as the idempotency key; the model had no per-charge reference.
+
+**Verification:** Genuine live test against the running server + real MongoDB,
+driving the full stack (raw-body capture → route → signature verify → DB write)
+with correctly-computed signatures (throwaway harness, since removed). 14/14
+assertions passed: (T1) a valid `charge.success` returns `200` and creates the
+row with `plan/status/paymentPlatform` set, `paystackLastReference` recorded, and
+`currentPeriodEnd` exactly 30 days out; (T2) a well-formed-but-wrong signature →
+`401`; (T3) a missing `x-paystack-signature` header → `401`; (T4) a duplicate
+delivery of the same charge → `200`, still exactly one row, and
+`currentPeriodEnd` unchanged (idempotent — no double-extension); (T5) a
+`charge.failed` event → `200` with no Subscription created. Test rows cleaned up
+afterward.

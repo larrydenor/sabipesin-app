@@ -9,6 +9,7 @@ const MatchController = require('./controllers/MatchController');
 const ConversationController = require('./controllers/ConversationController');
 const VerificationController = require('./controllers/VerificationController');
 const SubscriptionController = require('./controllers/SubscriptionController');
+const PaymentsController = require('./controllers/PaymentsController');
 const authMiddleware = require('./middlewares/auth');
 const asyncHandler = require('./utils/asyncHandler');
 
@@ -92,5 +93,14 @@ routes.get('/subscriptions/me', auth, asyncHandler(SubscriptionController.getMe)
 // authorization_url the client redirects to. Writes no Subscription row — the
 // plan is activated only by the signature-verified Paystack webhook (later slice).
 routes.post('/subscriptions/subscribe/paystack', auth, asyncHandler(SubscriptionController.subscribeWithPaystack));
+
+// Paystack webhook (spec §5, §6, §7). Deliberately NOT behind `auth` — Paystack
+// calls this server-to-server, so there's no JWT. Trust is established inside the
+// handler by verifying the HMAC-SHA512 `x-paystack-signature` over the raw body
+// (captured in server.js); an unsigned/forged request gets 401. On a genuine
+// charge.success this is the only path that activates a paid Subscription, and
+// it's idempotent on the charge reference so Paystack's retries don't
+// double-activate or extend the period twice.
+routes.post('/payments/webhook/paystack', asyncHandler(PaymentsController.paystackWebhook));
 
 module.exports = routes;

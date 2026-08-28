@@ -27,7 +27,17 @@ mongoose
     });
 
 app.use(cors());
-app.use(express.json());
+// Parse JSON bodies, and stash the raw bytes on `req.rawBody` as we go. The
+// Paystack webhook must verify an HMAC-SHA512 signature computed over the exact
+// bytes Paystack sent (spec §5) — re-serializing the parsed object would change
+// whitespace/key order and break the signature — so we capture the buffer here,
+// before parsing discards it. `verify` runs for every request but only the
+// webhook reads rawBody; the overhead is a single retained buffer per request.
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    },
+}));
 app.use(routes);
 // Error-handling middleware must be registered after the routes it covers.
 app.use(errorHandler);
