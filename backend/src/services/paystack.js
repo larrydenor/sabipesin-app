@@ -1,4 +1,5 @@
 const axios = require('axios');
+const crypto = require('crypto');
 
 // Paystack payments integration — the Android/web/PWA path for the "Unlimited"
 // subscription (spec §5, §6, §7). iOS goes through StoreKit instead; Paystack is
@@ -133,7 +134,42 @@ async function initializeSubscriptionTransaction({ email, reference, metadata } 
     };
 }
 
+// Verifies a Paystack webhook came from Paystack and wasn't tampered with (spec
+// §5 "never trust a client-reported purchase"). Paystack signs each webhook with
+// HMAC-SHA512 of the RAW request body keyed by our secret key, and sends the hex
+// digest in the `x-paystack-signature` header. We recompute it over the captured
+// raw bytes (see server.js `req.rawBody`) and compare.
+//   rawBody   — the exact request-body bytes (Buffer or string), NOT the parsed
+//               object; re-serializing would change the bytes and never match
+//   signature — the `x-paystack-signature` header value
+// Returns true only on an exact match. Any missing input, or a length/content
+// mismatch, returns false — the caller rejects with 401. The comparison is
+// constant-time to avoid leaking how much of the digest matched.
+function verifyWebhookSignature(rawBody, signature) {
+    if (!rawBody || !signature) {
+        return false;
+    }
+
+    const expected = crypto
+        .createHmac('sha512', PAYSTACK_SECRET_KEY)
+        .update(rawBody)
+        .digest('hex');
+
+    const expectedBuf = Buffer.from(expected, 'utf8');
+    const providedBuf = Buffer.from(String(signature), 'utf8');
+
+    // timingSafeEqual throws if the lengths differ, so short-circuit first. A
+    // valid Paystack signature is always a 128-char sha512 hex digest, so a
+    // length mismatch is by definition not a match.
+    if (expectedBuf.length !== providedBuf.length) {
+        return false;
+    }
+
+    return crypto.timingSafeEqual(expectedBuf, providedBuf);
+}
+
 module.exports = {
     initializeSubscriptionTransaction,
+    verifyWebhookSignature,
     PaystackError,
 };

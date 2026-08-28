@@ -39,6 +39,15 @@ const SubscriptionSchema = new Schema({
     paystackSubscriptionCode: {
         type: String,
     },
+    // The Paystack charge `reference` that last activated/renewed this row — the
+    // webhook's idempotency key. Paystack retries webhook deliveries, so the
+    // handler only applies a charge whose reference differs from this one; a
+    // repeat delivery of the same charge is a no-op and never pushes
+    // currentPeriodEnd out another 30 days. A fresh checkout carries a new
+    // reference and legitimately renews. Absent until the first charge lands.
+    paystackLastReference: {
+        type: String,
+    },
     // Apple's original transaction id — the stable key across renewals, iOS only.
     iosOriginalTransactionId: {
         type: String,
