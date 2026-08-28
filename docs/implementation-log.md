@@ -586,3 +586,78 @@ round-trips field-for-field) and does **not** always fall back to the free
 default — the two cases return distinct bodies. `paystackSubscriptionCode` is
 stored but intentionally not projected into the response (only the four §3
 plan-state fields are returned).
+
+---
+
+## Phase 6 (payments) — Paystack subscription init — `POST /subscriptions/subscribe/paystack`
+
+**Built:** The Android/web/PWA path for starting an "Unlimited" subscription
+(spec §5, §6, §7): a `paystack.js` service and an authenticated endpoint that
+initializes a Paystack transaction and returns the hosted-checkout
+`authorizationUrl`. **No** Subscription row is created or updated here, and the
+webhook is a separate later slice — this slice only opens checkout.
+
+> **⚠ LAUNCH BLOCKER — receipts break for real payments.** Paystack requires an
+> email and mails the payment **receipt** to it, but accounts are phone-only
+> (spec §3), so we synthesize a placeholder (`{phone}@users.sabipesin.com`).
+> That means **real payers never receive a receipt.** This must be resolved
+> before Paystack goes live — *not* just before this feature ships. Fix is its
+> own email-capture slice (optional `Profile.email` + a write path); the
+> read-side seam is already in `subscribeWithPaystack`
+> (`profile?.email || synthesized`). Tracked in `sabipesin-todo-list.md`.
+
+- `src/services/paystack.js` — same shape as `termii.js`/`qoreid.js`/
+  `cloudinary.js`. `initializeSubscriptionTransaction({ email, reference,
+  metadata })` calls `POST {PAYSTACK_BASE_URL}/transaction/initialize` with a
+  `Bearer` secret key and resolves to
+  `{ authorizationUrl, accessCode, reference, amount, plan, raw }`. Validates
+  Paystack's `{ status, message, data }` envelope; a non-`true` status or a
+  missing `authorization_url` throws `PaystackError`. Raw axios/network failures
+  are also wrapped as `PaystackError`.
+- `src/controllers/SubscriptionController.js` — `subscribeWithPaystack`:
+  generates an idempotent `reference` (UUID), synthesizes the Paystack-required
+  `email` from the phone-only account, passes `metadata: { userId, plan:
+  'unlimited', paymentPlatform: 'paystack' }` for later webhook reconciliation,
+  and returns `201 { message, authorizationUrl, accessCode, reference }`.
+  Read-only guard: `409` if the caller already has an active `unlimited` row.
+- `src/routes.js` — registered `POST /subscriptions/subscribe/paystack` (auth).
+- `src/middlewares/errorHandler.js` — `PaystackError` → `502` (mirrors
+  Termii/QoreID/Cloudinary mapping).
+
+**Config (env):** `PAYSTACK_SECRET_KEY` (required; fail-fast at boot),
+`PAYSTACK_BASE_URL` (default `https://api.paystack.co`),
+`PAYSTACK_UNLIMITED_AMOUNT_KOBO` (placeholder `500000` = ₦5,000),
+`PAYSTACK_UNLIMITED_PLAN_CODE` (optional `PLN_…`; when set, initializes against a
+dashboard Plan so Paystack manages recurring billing — amount then comes from the
+plan), `PAYSTACK_CALLBACK_URL` (optional web redirect).
+
+**Response shape:**
+```json
+{ "message": "Paystack transaction initialized",
+  "authorizationUrl": "https://checkout.paystack.com/…",
+  "accessCode": "…", "reference": "…" }
+```
+
+**Deviations from / additions to spec:**
+- **No dev-mode toggle** (unlike `qoreid.js`'s `QOREID_ENABLED`): Paystack's
+  `sk_test_`/`pk_test_` keys *are* the sandbox — test calls are free and safe, so
+  we always hit the real API and let the key decide test vs. live.
+- **Synthesized email** (`{phone}@users.sabipesin.com`): Paystack requires an
+  email but spec §3 `User` is phone-only. Stable + well-formed so a user maps to
+  a stable Paystack customer. **This is the launch blocker called out above** —
+  see the callout and `sabipesin-todo-list.md`, not just a passing TODO.
+- **Amount is a placeholder** — the final naira price is still open (spec §9).
+  Set `PAYSTACK_UNLIMITED_AMOUNT_KOBO`, or a `PAYSTACK_UNLIMITED_PLAN_CODE`,
+  before launch.
+- **No persistence** by design: the plan is activated only by the
+  signature-verified webhook. `metadata`/`reference` carry the mapping so no
+  pre-created DB row is needed.
+
+**Verification:** Genuine live call against Paystack's **sandbox** with the real
+`sk_test_` key from `.env` (throwaway harness, since removed). `POST
+/transaction/initialize` returned `HTTP 200` with a real hosted-checkout URL
+(`https://checkout.paystack.com/…`), an `access_code`, and our `reference` echoed
+back verbatim — confirming the request is well-formed and the envelope parsing is
+correct. Also smoke-loaded the controller, service, error handler, and
+`routes.js`: all require cleanly and the `POST /subscriptions/subscribe/paystack`
+route is registered.

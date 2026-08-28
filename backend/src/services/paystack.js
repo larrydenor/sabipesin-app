@@ -1,0 +1,139 @@
+const axios = require('axios');
+
+// Paystack payments integration — the Android/web/PWA path for the "Unlimited"
+// subscription (spec §5, §6, §7). iOS goes through StoreKit instead; Paystack is
+// never used on iOS (Apple requires IAP for digital subscriptions).
+//
+// This module's only job here is to INITIALIZE a Paystack transaction and hand
+// back the hosted checkout URL:
+//
+//   initializeSubscriptionTransaction -> POST {BASE}/transaction/initialize
+//     -> { authorization_url, access_code, reference }
+//
+// The client redirects the browser (or opens the Paystack SDK) to
+// `authorization_url` to actually pay. NOTHING is persisted here and no
+// Subscription row is written — activation happens only when the
+// signature-verified Paystack webhook confirms the charge (a later slice, spec
+// §5 "never trust a client-reported purchase"). We carry `metadata` (our userId
+// + plan) and our own `reference` through the transaction so the webhook can map
+// the payment back to the right user without any pre-created DB row.
+//
+// Unlike qoreid.js there's no ENABLED dev-toggle: Paystack's sk_test_/pk_test_
+// keys ARE the sandbox — test-mode calls are free and safe, so we always hit the
+// real API and let the key decide test vs. live.
+//
+// TODO(pricing): the final naira price of the Unlimited plan is still open (spec
+// §9). PAYSTACK_UNLIMITED_AMOUNT_KOBO is a placeholder default; set the real
+// price via env, or set PAYSTACK_UNLIMITED_PLAN_CODE to a dashboard-created Plan
+// so Paystack manages the recurring billing itself.
+
+const {
+    PAYSTACK_SECRET_KEY,
+    PAYSTACK_BASE_URL = 'https://api.paystack.co',
+    // Amount to charge in kobo when there's no dashboard Plan. Placeholder
+    // ₦5,000 until the real price is set (spec §9 open item).
+    PAYSTACK_UNLIMITED_AMOUNT_KOBO = '500000',
+    // Optional Paystack "Plan" code (PLN_xxx) created in the dashboard. When set,
+    // the transaction is initialized against the plan and Paystack creates &
+    // manages the recurring subscription itself (the amount is taken from the
+    // plan); when unset we fall back to a one-time charge of AMOUNT_KOBO. The two
+    // are mutually exclusive on transaction/initialize — mirrors qoreid.js's
+    // workflow-vs-collection dual mode.
+    PAYSTACK_UNLIMITED_PLAN_CODE,
+    // Where Paystack redirects the browser after checkout (web/PWA). Optional —
+    // the native Android SDK returns control in-app and ignores this.
+    PAYSTACK_CALLBACK_URL,
+} = process.env;
+
+if (!PAYSTACK_SECRET_KEY) {
+    throw new Error(
+        'PAYSTACK_SECRET_KEY is not set. Copy .env.example to .env and provide the Paystack secret key.'
+    );
+}
+
+// A Paystack request that reaches the API but is rejected (bad key, invalid
+// params) — or an API response whose envelope reports `status: false` — surfaces
+// as this error. Matched by name in the central error handler (like TermiiError /
+// QoreIdError) and mapped to a 502, so this module stays decoupled from HTTP.
+class PaystackError extends Error {
+    constructor(message, { status, data } = {}) {
+        super(message);
+        this.name = 'PaystackError';
+        this.status = status;
+        this.data = data;
+    }
+}
+
+// Bearer secret-key header for Paystack's REST API.
+function authHeader() {
+    return `Bearer ${PAYSTACK_SECRET_KEY}`;
+}
+
+// Initializes a Paystack transaction for the Unlimited subscription.
+//   email     — the customer's email (Paystack requires one; see the controller
+//               for how we source it from a phone-only account)
+//   reference — our own idempotent transaction reference, carried through so the
+//               webhook can reconcile the charge back to this attempt
+//   metadata  — arbitrary object echoed back on the webhook (we pass userId/plan)
+// Resolves to { authorizationUrl, accessCode, reference, amount, plan, raw }.
+// `authorizationUrl` is the only value the client strictly needs to continue.
+async function initializeSubscriptionTransaction({ email, reference, metadata } = {}) {
+    const amount = Number(PAYSTACK_UNLIMITED_AMOUNT_KOBO) || 500000;
+
+    const payload = {
+        email,
+        // Paystack ignores `amount` when a `plan` is supplied (it uses the plan's
+        // amount), but we always send it so the one-time-charge fallback works.
+        amount,
+        currency: 'NGN',
+        reference,
+        metadata,
+    };
+    if (PAYSTACK_UNLIMITED_PLAN_CODE) {
+        payload.plan = PAYSTACK_UNLIMITED_PLAN_CODE;
+    }
+    if (PAYSTACK_CALLBACK_URL) {
+        payload.callback_url = PAYSTACK_CALLBACK_URL;
+    }
+
+    let data;
+    try {
+        ({ data } = await axios.post(
+            `${PAYSTACK_BASE_URL}/transaction/initialize`,
+            payload,
+            {
+                headers: {
+                    Authorization: authHeader(),
+                    'Content-Type': 'application/json',
+                },
+            },
+        ));
+    } catch (err) {
+        if (err.response) {
+            const { status, data: body } = err.response;
+            const message = (body && (body.message || body.error)) || `Paystack request failed (${status})`;
+            throw new PaystackError(message, { status, data: body });
+        }
+        throw new PaystackError(`Could not reach Paystack: ${err.message}`);
+    }
+
+    // Paystack envelopes every response as { status: boolean, message, data }.
+    // A truthy `status` with a `data.authorization_url` is the only success shape.
+    if (!data || data.status !== true || !data.data || !data.data.authorization_url) {
+        throw new PaystackError((data && data.message) || 'Paystack did not return an authorization URL', { data });
+    }
+
+    return {
+        authorizationUrl: data.data.authorization_url,
+        accessCode: data.data.access_code,
+        reference: data.data.reference,
+        amount,
+        plan: PAYSTACK_UNLIMITED_PLAN_CODE || null,
+        raw: data.data,
+    };
+}
+
+module.exports = {
+    initializeSubscriptionTransaction,
+    PaystackError,
+};

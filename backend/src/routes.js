@@ -87,4 +87,10 @@ routes.get('/conversations/:id/messages', auth, asyncHandler(ConversationControl
 // and the signature-verified webhooks are later slices of Phase 6.
 routes.get('/subscriptions/me', auth, asyncHandler(SubscriptionController.getMe));
 
+// Paystack subscription init (spec §6, §5, §7). Authenticated, Android/web path.
+// Initializes a Paystack transaction for the "Unlimited" plan and returns the
+// authorization_url the client redirects to. Writes no Subscription row — the
+// plan is activated only by the signature-verified Paystack webhook (later slice).
+routes.post('/subscriptions/subscribe/paystack', auth, asyncHandler(SubscriptionController.subscribeWithPaystack));
+
 module.exports = routes;
