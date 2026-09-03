@@ -5,9 +5,12 @@ export type AuthStackParamList = {
   OtpEntry: { phone: string };
 };
 
-// ProfileSetup is shown after sign-in when the user has no profile yet (a 404
-// from GET /profile/me). Once a profile exists, the app stack starts on Home.
+// Onboarding order after sign-in: ProfileSetup → PhotoUpload → Home. The entry
+// point is chosen from GET /profile/me — no profile (404) starts on ProfileSetup;
+// a profile with no photos starts on PhotoUpload (a photoless profile can't be
+// shown in discovery); an existing profile with photos goes straight to Home.
 export type AppStackParamList = {
   ProfileSetup: undefined;
+  PhotoUpload: undefined;
   Home: undefined;
 };

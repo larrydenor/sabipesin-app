@@ -930,3 +930,106 @@ an `ApiError { kind, status, retryAfterSeconds, attemptsLeft }`:
 **Verification:** `tsc --noEmit` clean. Not yet run end-to-end against the live
 backend from a device (blocked on the Termii OTP send limitation noted in the
 project memory); the flow is wired to the real endpoints and ready to run.
+
+---
+
+## Mobile — photo upload screen (`PhotoUploadScreen`, onboarding step 2)
+
+**Built:** A new onboarding step between profile setup and Home. A user who has
+just created a profile now lands on a photo grid, adds photos from the library or
+camera, and can't reach Home until at least one photo is uploaded (a photoless
+profile can't appear in discovery).
+
+- **Screen** (`src/screens/PhotoUploadScreen.tsx`): a 3-column grid of photo
+  tiles plus a dashed "Add photo" tile (hidden once at the `MAX_PHOTOS = 6` cap,
+  mirroring the backend). "Add photo" opens a native `Alert` action sheet →
+  **Photo Library** (multi-select, `selectionLimit` = remaining slots) or **Take
+  Photo** — no third-party action-sheet dependency. Uses `expo-image-picker`
+  (added via `expo install`, v15.1.0) with runtime permission requests; a denied
+  permission shows an explanatory `Alert` rather than failing silently.
+  - **Serial upload queue.** Each selected photo is `POST`ed one at a time. The
+    primary flag is decided by array position server-side (`isPrimary:
+    photos.length === 0`), so serial uploads keep "first chosen = main" and
+    avoid two photos both landing as primary from a race. A re-entrant guard
+    (`processingRef`) lets adding more photos mid-run just extend the same queue.
+  - **Per-photo status** (`pending | uploading | uploaded | error | deleting`)
+    rendered as tile overlays: spinner while in flight, a tap-to-retry surface on
+    failure, a "Main" badge on the server-marked primary, and a remove (×) button.
+  - **Graceful failure.** A failed upload marks only that tile `error` and leaves
+    the rest of the queue and selections intact — retry re-enqueues just that one,
+    no re-picking. The local file URI is kept for the retry.
+  - **Remove.** Uploaded photos call `DELETE /profile/photos/:photoId` and
+    reconcile from the returned profile (so a promoted primary updates its badge);
+    not-yet-uploaded selections are dropped locally only.
+  - **Continue** is disabled until ≥1 photo is `uploaded` and nothing is in
+    flight, then `navigation.reset`s to Home so Back can't return into onboarding.
+- **Routing gate** (`src/navigation/RootNavigator.tsx`, `AppFlow`): the
+  post-sign-in `GET /profile/me` check is now three-way — `404` → `ProfileSetup`,
+  `200` with zero `photos` → `PhotoUpload`, `200` with photos → `Home`. This makes
+  the "≥1 photo" requirement durable across app restarts (killing the app after
+  profile save resumes on the photo step, not Home). `PhotoUpload` is registered
+  in the `AppStack` with the header back button hidden and swipe-back disabled,
+  like `ProfileSetup`. `ProfileSetupScreen` now resets to `PhotoUpload` (was Home)
+  on successful save.
+- **API layer** (`src/api/profile.ts`): added `ProfilePhoto` type, `photos?` on
+  `Profile`, and `uploadProfilePhoto()` / `deleteProfilePhoto()`.
+  `uploadProfilePhoto` sends `multipart/form-data` with the single field name
+  **`photo`** (the exact name the backend's multer expects) and a per-request
+  `Content-Type: multipart/form-data` override (RN fills the boundary), returning
+  the full updated profile so callers can read back each photo's `_id`/`isPrimary`.
+
+**API contract consumed** (matches `ProfileController` / `routes.js`):
+- `POST /profile/photos` — multipart field `photo`, one image ≤ 5 MB, `image/*`.
+  `201` full profile; first photo auto-primary; `409` at 6 photos.
+- `DELETE /profile/photos/:photoId` — `200` updated profile; promotes a new
+  primary if the deleted one was primary.
+- `GET /profile/me` — now also read for `photos` to drive the routing gate.
+
+**Config:** Added the `expo-image-picker` config plugin to `app.json` with iOS
+photo-library and camera usage strings (needed for dev/standalone builds; Expo Go
+already ships its own usage descriptions).
+
+**Notes / deviations:**
+- `MediaTypeOptions.Images` is used (correct for SDK 51 / picker v15; the
+  `mediaTypes: ['images']` array form lands in a later SDK).
+- Camera is unavailable on the iOS simulator — "Take Photo" is expected to no-op
+  there; test the camera path on a physical device. Library selection works on
+  the simulator.
+- The local `MAX_PHOTOS = 6` mirrors the backend constant; the server remains the
+  source of truth (a `409` surfaces as a per-tile error).
+
+**Verification:** Mobile `tsc --noEmit` clean. Not yet run on a device — handed to
+the user to test live with real photos on the simulator (their request); wired to
+the real endpoints and ready to run.
+
+### Fix — routing gate keys on profile completeness, not existence
+
+**Bug:** `POST /profile/photos` upserts a bare profile (`new Profile({ userId })`)
+the first time a user uploads, and `name/dob/gender/lookingFor` are all optional
+in the schema — so a fieldless profile persists and `GET /profile/me` returns
+`200`. The onboarding gate treated any `200` as "has profile" and skipped
+`ProfileSetup`, so a user who reached photos before setup (only possible via the
+earlier Fast Refresh state glitch, but a latent hole) could land on Home with an
+empty profile.
+
+**Fix** (`src/api/profile.ts`, `src/navigation/RootNavigator.tsx`): added
+`isProfileComplete(profile)` (all of `name/dob/gender/lookingFor` populated —
+mirrors ProfileSetup's client-required set, exported as `REQUIRED_PROFILE_FIELDS`)
+and made the gate route on completeness: `404` **or** an incomplete `200` →
+`ProfileSetup`; complete + 0 photos → `PhotoUpload`; complete + ≥1 photo → `Home`.
+Confirmed the only in-app paths to `PhotoUpload` are the gate and ProfileSetup's
+post-save `reset` (which fires only after the required fields validate and `PUT
+/profile/me` succeeds) — no stray `navigate('PhotoUpload')`.
+
+**Verification — live, against the running backend on Atlas** (`sabipesin`
+cluster): a throwaway verified user driven through six states via real HTTP
+`GET`/`PUT /profile/me`, evaluating the shipped gate logic on the actual
+responses. 6/6 passed — (A) no profile `404`→ProfileSetup; (B) bare profile
+(`PUT {}`, 0 photos) `200`→ProfileSetup; (C) **incomplete (no required fields)
++1 photo** `200`→ProfileSetup (the exact reported bug shape — a photo no longer
+forces Home); (D) complete, 0 photos →PhotoUpload; (E) complete +1 photo →Home;
+(F) **partial (optional `bio` set, required `name` missing) +1 photo**
+→ProfileSetup (the gate requires *all* required fields, and isn't fooled by a
+partially-filled profile that already has a photo). Test user/profile fixtures
+deleted afterward; DB confirmed restored (4 users, 0 profiles). Mobile
+`tsc --noEmit` clean.
