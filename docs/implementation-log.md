@@ -800,3 +800,51 @@ one Transaction, still `success` (idempotent); (T6) a subscription
 `charge.success` (no `type`) → `200`, a `Subscription` row is activated and **no
 new Transaction created** (webhook routes correctly); (T7) a forged signature →
 `401`. Test rows cleaned up afterward.
+
+---
+
+## Mobile app scaffold + phone OTP sign-in flow (`mobile/`)
+
+**Built:** Replaced the untouched React Native 0.60.4 boilerplate in `mobile/`
+with a real Expo (managed, SDK 51, TypeScript) project and shipped the first flow:
+phone-number entry → OTP verification → secure token storage → placeholder Home.
+
+- **Toolchain:** Expo managed workflow (`npx expo start`, no Xcode/Android Studio
+  required for Expo Go). React Navigation v6 native-stack. axios API client.
+- **API base URL is config, not hardcoded:** `EXPO_PUBLIC_API_BASE_URL` (Expo
+  build-time public env), read once in `src/config/env.ts`, with a platform-aware
+  localhost fallback (`10.0.2.2:3333` on Android emulator) and a warning if unset.
+  Backend has no `/api` prefix — routes are mounted at root on port `3333`.
+- **Secure token storage:** `expo-secure-store` (iOS Keychain / Android Keystore)
+  in `src/auth/tokenStorage.ts` for the JWT access/refresh pair — never
+  AsyncStorage. `AuthContext` bootstraps the session from it on launch and drives
+  the auth-stack ↔ app-stack switch in `RootNavigator`.
+- **Screens** (`src/screens/`): `PhoneEntryScreen` → `POST /auth/otp/request`;
+  `OtpEntryScreen` → `POST /auth/otp/verify` (auto-submit at 6 digits, resend with
+  cooldown); `HomeScreen` placeholder with sign-out (clears tokens → back to auth).
+
+**API contract consumed** (matches `AuthController`):
+- `POST /auth/otp/request { phone }` → `200 { message, phone }` (phone normalized
+  to `234XXXXXXXXXX`, reused verbatim by verify).
+- `POST /auth/otp/verify { phone, code }` → `200 { accessToken, refreshToken,
+  verificationTier, ... }`.
+
+**Error handling:** All axios rejections are normalized in `src/api/errors.ts` to
+an `ApiError { kind, status, retryAfterSeconds, attemptsLeft }`:
+- invalid phone / missing code / **expired code** (`400`) → backend message shown;
+- **wrong code** (`400` + `attemptsLeft`) → message with "N attempts left" appended;
+- **rate limit** (`429`) → `Retry-After` header (or the "wait Ns" message) seeds the
+  resend countdown; hourly-cap message shown as-is;
+- **SMS provider failure** (`502`) and **no-response/network** → retriable messages.
+
+**Deviations / notes:**
+- Removed the RN 0.60 native `android/` & `ios/` folders and stale RN config
+  (Flow/Buck/metro/jest) — Expo manages native code; run `expo prebuild` if bare
+  native projects are ever needed. Old `assets/` (tindev like/dislike PNGs) left
+  in place, unreferenced by `app.json`.
+- Light client-side phone pre-check only (length by format); the backend's
+  `normalizePhone` remains the source of truth.
+
+**Verification:** `tsc --noEmit` clean. Not yet run end-to-end against the live
+backend from a device (blocked on the Termii OTP send limitation noted in the
+project memory); the flow is wired to the real endpoints and ready to run.

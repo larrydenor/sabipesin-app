@@ -17,6 +17,17 @@ const RESEND_COOLDOWN_MS = 60 * 1000;       // min gap between requests to a num
 const REQUEST_WINDOW_MS = 60 * 60 * 1000;   // rolling window for the request cap
 const MAX_REQUESTS_PER_WINDOW = 5;          // max OTP requests per number per hour
 
+// Dev-only OTP echo. Returns true ONLY when we're outside production AND the
+// dedicated OTP_DEV_ECHO flag is explicitly set — never on NODE_ENV alone, so a
+// misconfigured/absent NODE_ENV in prod can't accidentally leak codes. When on,
+// requestOtp returns the plaintext code (and won't fail on a Termii delivery
+// error) so a device can complete the flow while the real Sender ID is pending.
+// This is a launch blocker to confirm OFF before production; verifyOtp is never
+// affected — it always checks the bcrypt hash exactly as in production.
+function otpDevEchoEnabled() {
+    return process.env.NODE_ENV !== 'production' && process.env.OTP_DEV_ECHO === 'true';
+}
+
 // Cryptographically secure 6-digit code. crypto.randomInt is uniform and
 // unpredictable (never Math.random); padStart keeps leading-zero codes valid.
 function generateCode() {
@@ -98,10 +109,28 @@ async function requestOtp(req, res) {
     const code = generateCode();
     const codeHash = await bcrypt.hash(code, BCRYPT_ROUNDS);
 
-    // A TermiiError here propagates to the central error handler (-> 502); the
-    // throw also stops execution, so no Verification is recorded on a failed send.
     const message = `Your SabiPesin verification code is ${code}. It expires in ${OTP_TTL_MS / 60000} minutes.`;
-    const { messageId } = await termii.sendSms(phone, message);
+
+    // In dev-echo mode we still attempt the real SMS but never let a delivery
+    // failure fail the request (the code comes back in the body regardless).
+    // Otherwise a TermiiError propagates to the central error handler (-> 502);
+    // the throw also stops execution, so no Verification is recorded on a
+    // failed send.
+    const devEcho = otpDevEchoEnabled();
+    let messageId = null;
+    if (devEcho) {
+        // Same info as the response `devCode`, echoed to the server console so a
+        // developer testing from a device/simulator (where the HTTP body isn't
+        // visible) can read the code. Gated by the same flag — off in production.
+        console.log(`[otp-dev-echo] ${phone} -> ${code}`);
+        try {
+            ({ messageId } = await termii.sendSms(phone, message));
+        } catch (err) {
+            messageId = null;
+        }
+    } else {
+        ({ messageId } = await termii.sendSms(phone, message));
+    }
 
     // Only one code is live at a time: supersede any earlier pending codes so an
     // older SMS can't also be used to verify.
@@ -121,7 +150,11 @@ async function requestOtp(req, res) {
         attempts: 0,
     });
 
-    return res.json({ message: 'Verification code sent', phone });
+    const responseBody = { message: 'Verification code sent', phone };
+    // Dev-only: surface the plaintext code so the flow works without SMS. Gated
+    // by otpDevEchoEnabled() — never reached in production.
+    if (devEcho) responseBody.devCode = code;
+    return res.json(responseBody);
 }
 
 // POST /auth/otp/verify  { phone, code }  -> { accessToken, refreshToken }
