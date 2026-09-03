@@ -26,7 +26,10 @@ const ProfileSchema = new Schema({
     },
     name: { type: String },
     dob: { type: Date },
-    gender: { type: String },
+    // Opposite-sex matching by product decision: gender is a closed set and
+    // discovery derives a user's match target directly from it (male ↔ female),
+    // so there is deliberately no separate "interestedIn"/preference field.
+    gender: { type: String, enum: ['male', 'female'] },
     lookingFor: {
         type: String,
         enum: ['casual', 'serious', 'marriage', 'friendship'],
