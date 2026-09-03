@@ -136,8 +136,9 @@ export function ProfileSetupScreen({ navigation }: Props) {
     setSubmitting(true);
     try {
       await updateMyProfile(payload);
-      // Profile now exists — replace the stack so Back can't return to setup.
-      navigation.reset({ index: 0, routes: [{ name: 'Home' }] });
+      // Profile now exists — advance to photos. Reset (not push) so Back can't
+      // return to setup; the user must add a photo before reaching Home.
+      navigation.reset({ index: 0, routes: [{ name: 'PhotoUpload' }] });
     } catch (e) {
       // Map backend validation errors (invalid enum, bad date cast, …) to the
       // relevant field; anything unattributable falls back to the banner.
@@ -164,7 +165,7 @@ export function ProfileSetupScreen({ navigation }: Props) {
       >
         <Text style={styles.title}>Set up your profile</Text>
         <Text style={styles.subtitle}>
-          Tell people a bit about you. You can add photos and location later.
+          Tell people a bit about you. You’ll add photos next; location can come later.
         </Text>
 
         {errors._form ? <Text style={styles.formError}>{errors._form}</Text> : null}
