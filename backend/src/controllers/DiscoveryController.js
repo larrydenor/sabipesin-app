@@ -75,6 +75,16 @@ async function getDiscovery(req, res) {
         userId: { $ne: meId, $nin: swipedTargetIds },
     };
 
+    // Opposite-sex matching (product decision): derive the target gender directly
+    // from the requester's own gender — male sees only female profiles and vice
+    // versa. Naturally also excludes candidates with no gender set (they can't be
+    // confirmed as the opposite sex). If the requester hasn't set their own gender
+    // yet, no gender filter is applied — we can't derive a target from nothing.
+    const myGender = myProfile && myProfile.gender;
+    if (myGender === 'male' || myGender === 'female') {
+        match.gender = myGender === 'male' ? 'female' : 'male';
+    }
+
     // Geo filter only when the requester has a usable location. Candidates within
     // maxDistanceKm OR with no location of their own are kept — the distance rule
     // only binds when both sides have a location (spec §4.6).

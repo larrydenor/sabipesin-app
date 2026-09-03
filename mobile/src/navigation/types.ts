@@ -5,6 +5,9 @@ export type AuthStackParamList = {
   OtpEntry: { phone: string };
 };
 
+// ProfileSetup is shown after sign-in when the user has no profile yet (a 404
+// from GET /profile/me). Once a profile exists, the app stack starts on Home.
 export type AppStackParamList = {
+  ProfileSetup: undefined;
   Home: undefined;
 };

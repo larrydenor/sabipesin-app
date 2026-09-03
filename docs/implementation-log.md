@@ -6,6 +6,88 @@ feature, committed together with that feature's code.
 
 ---
 
+## Mobile — profile creation screen + post-sign-in routing (+ gender enum & opposite-sex discovery filter)
+
+**Built:** After sign-in the app now decides where to land by asking the backend
+whether the user has a profile, and a form for creating it. Also closes a spec gap
+on `gender` (see "Backend" and "Deviations" below).
+
+- **Routing gate** (`src/navigation/RootNavigator.tsx`, `AppFlow`): once
+  authenticated, calls `GET /profile/me`. A `404` (no profile) starts the app
+  stack on `ProfileSetup`; a `200` starts it on `Home`. While the check runs it
+  shows a spinner; a non-404 failure (network/5xx) shows a retriable error screen
+  with "Try again" and "Sign out" rather than guessing a destination. Both screens
+  live in the `AppStack`; the fetched flag only sets `initialRouteName`. On future
+  sign-ins the profile exists → straight to Home.
+- **Screen** (`src/screens/ProfileSetupScreen.tsx`): scrollable form for the
+  writable fields — `name`, `dob`, `gender`, `lookingFor`, `bio`, `interests`,
+  `state`, `lga`. On submit calls `PUT /profile/me` (upsert), then
+  `navigation.reset` to `Home` so Back can't return to setup. `ProfileSetup` hides
+  the header back button and disables the swipe-back gesture.
+  - `gender` → single-select chips restricted to the server enum
+    (`male|female`, labelled Woman/Man) — see Backend below.
+  - `lookingFor` → single-select chips restricted to the server enum
+    (`casual|serious|marriage|friendship`), so an invalid enum can't be sent.
+  - `dob` → dependency-free masked text input (`YYYY-MM-DD`, digits auto-dashed),
+    validated client-side as a real past date before sending (no native
+    date-picker dependency added).
+  - `interests` → add/remove tag chips (case-insensitive de-dupe), sent as a
+    string array.
+  - Client-side required: `name`, `dob`, `gender`, `lookingFor`. Optional fields
+    are omitted from the payload when blank (no empty strings stored).
+- **API layer** (`src/api/profile.ts`): typed `getMyProfile()` / `updateMyProfile()`
+  wrappers plus `parseFieldErrors(ApiError)`.
+
+**Backend — gender enum + opposite-sex discovery filter (product decision):**
+- `Profile.gender` gained an enum `['male', 'female']` (`models/Profile.js`). The
+  spec (`technical-build-spec.md`) had `gender: String` with **no enum** and no
+  `interestedIn`/preference field, and `DiscoveryController` never filtered on
+  gender — so gender was collected but unused, and everyone saw everyone. Product
+  decision: **opposite-sex matching only.**
+- `DiscoveryController.getDiscovery` now derives the match target from the
+  requester's **own** gender — `male` sees only `female` profiles and vice versa
+  (one `match.gender = opposite` condition on the base query). This also excludes
+  candidates with no gender set (can't confirm opposite sex). If the requester has
+  no gender yet, no gender filter is applied. Deliberately **no** separate
+  `interestedIn`/preference field — the target is derived, not stored.
+
+**Error handling:** Backend `400`s are shown **inline per field**, not as one
+generic banner. The central handler returns the raw Mongoose message as
+`{ error }`; `parseFieldErrors` handles both shapes — `ValidationError`
+(`"… validation failed: <path>: <detail>, …"`, comma-separated) and `CastError`
+(`… at path "<field>"`) — and maps each to its form field. Anything it can't
+attribute to a known field falls back to a `_form` banner. Local validation errors
+use the same per-field mechanism.
+
+**API contract consumed** (matches `ProfileController`):
+- `GET /profile/me` → `200` profile, or `404 { error: 'Profile not found' }`.
+- `PUT /profile/me` → `200` upserted profile; `400 { error }` on validation/cast.
+
+**Deviations from spec:**
+- Added `gender` enum `['male', 'female']` and a gender filter in
+  `DiscoveryController` — the spec had neither. Reason: opposite-sex matching is a
+  product decision; without this, discovery ignored gender entirely. Match target
+  is derived from the user's own gender (no `interestedIn` field) by design.
+
+**Notes:**
+- `dob` uses a manual text mask instead of a native date picker to avoid adding
+  `@react-native-community/datetimepicker` for this slice; easy to swap later.
+- `name`/`dob`/`gender`/`lookingFor` are treated as **required client-side** for a
+  usable profile even though the backend requires none — trivially relaxed if the
+  product wants a lighter first step.
+
+**Verification:**
+- Mobile `tsc --noEmit` clean. The RN screen itself is not yet exercised from a
+  device (same live-OTP blocker noted in project memory); wired to the real
+  endpoints and ready to run.
+- **Discovery filter — live-tested** against a throwaway local `mongod` + the real
+  backend (isolated from the Atlas cluster): three users (two men, one woman) via
+  the real OTP dev-echo sign-in → `PUT /profile/me` → `GET /discovery`. 8/8 checks
+  passed — a man sees only the woman (both men and self excluded), the woman sees
+  both men (self excluded), and an invalid `gender` is rejected with `400`.
+
+---
+
 ## Photo upload — `POST /profile/photos`, `DELETE /profile/photos/:photoId`
 
 **Built:** Cloudinary-backed profile photo upload and delete.
