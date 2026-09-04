@@ -1097,3 +1097,138 @@ yet (buttons only, by request); gesture-based swiping is a later polish pass.
 **Verification:** Mobile `tsc --noEmit` clean. Not yet run on a device — handed to
 the user to run live against the backend (their request); wired to the real
 endpoints and ready.
+
+---
+
+## Get-or-create conversation for a match — `POST /matches/:id/conversation`
+
+**Built:** The missing bridge between a Match and its chat thread. A Match is
+created on a mutual like (`SwipeController`), but nothing ever created its
+`Conversation`, so the messaging layer (`GET /conversations/:id/messages` and the
+Socket.IO events) had no thread to attach to — a freshly matched user had a
+`matchId` but no `conversationId`, and `message:send` would fail
+`"Conversation not found"`. This endpoint closes that gap: the mobile chat is
+keyed by `matchId` and resolves its `conversationId` here on first open.
+
+- `POST /matches/:id/conversation` (`src/controllers/ConversationController.js`,
+  `getOrCreateConversation`) — authenticated, no body. Returns the existing
+  conversation for the match, or **creates it on first open** (lazy — so matches
+  nobody chats on never spawn an empty thread). Response is the same shape as one
+  entry of `GET /conversations`:
+  ```json
+  { "viewerVerificationTier": "phone",
+    "conversation": {
+      "id": "...", "matchId": "...", "lastMessageAt": "...",
+      "otherUser": { "id": "...", "verificationTier": "nin", "profile": { ... } } } }
+  ```
+  `201` on the create, `200` on every subsequent hit.
+- **Idempotent.** The `Conversation.matchId` unique index guarantees one thread
+  per match; the handler `findOne`s first (to report 201-vs-200 honestly) and
+  wraps the insert in a `try/catch` on duplicate-key (`11000`) that re-reads the
+  winner — so two devices opening the same match at once still converge on one
+  conversation. Mirrors `SwipeController.upsertMatch`'s race handling.
+- **Participant-scoped, info-leak-safe.** `Match.findOne({ _id, $or: [{userA:
+  me},{userB: me}] })` — a match that isn't the requester's, a missing id, and a
+  malformed (non-ObjectId) id all `404 "Match not found"` indistinguishably, the
+  same posture as `GET /matches/:id` and the message read layer. The endpoint
+  can't be used to probe whether an arbitrary match id exists.
+- Refactored the conversation-shaping into a shared `shapeConversation` helper
+  used by both `listConversations` and this endpoint (mirrors
+  `MatchController.shapeMatch`).
+
+**New route:** `src/routes.js` — `POST /matches/:id/conversation`.
+
+**Deviations from spec:**
+- The get-or-create endpoint isn't named in the spec; it's the natural home for
+  the lazy conversation creation the messaging slice assumed but never built.
+  Chosen over creating the conversation eagerly in `SwipeController` so existing
+  matches self-heal on first open with no backfill migration, and no empty
+  threads accumulate for matches that never chat.
+- Match `status` is not checked (an `active`-only filter isn't applied) — mirrors
+  `GET /matches/:id` and the conversation read layer, which also don't. When an
+  unmatch path lands it can gate all three together.
+
+**Verification:** Smoke-tested end-to-end against live MongoDB (20 assertions, all
+passing) by driving the real `getOrCreateConversation` handler with mock req/res
+(same approach as the messaging-slice entry), temp data cleaned up after. Seed:
+users A (phone-verified), B (NIN-verified), C (outsider), a real canonical A–B
+match.
+- First open as A → `201`, returns a conversation tied to the match,
+  `otherUser` resolves to **B** with B's `nin` tier and public profile,
+  `viewerVerificationTier` is A's `phone`, exactly one conversation row exists.
+- Second open as A → `200`, **same** conversation id, still one row (idempotent).
+- Open as B → `200`, same conversation id, `otherUser` resolves to A with A's
+  `phone` tier; still one row after both sides opened.
+- Non-participant C → `404 "Match not found"` (no thread created, no leak).
+- Malformed id → `404` (no cast crash). Well-formed but non-existent id → `404`.
+
+---
+
+## Mobile chat screen — real-time messaging (Phase 5, mobile)
+
+**Built:** The mobile chat experience: a conversation screen wired to the backend
+Socket.IO contract, a minimal matches list to reach it, and a "Send a message"
+entry point on the match overlay. Keyed by `matchId` throughout — the chat
+resolves its `conversationId` on open via `POST /matches/:id/conversation` (the
+get-or-create endpoint above), so the overlay/matches-list only ever need the
+`matchId` the swipe response and `GET /matches` already provide.
+
+**New files:**
+- `src/api/messaging.ts` — typed wrappers: `getOrCreateConversation(matchId)`,
+  `getMessages(conversationId, page)` (newest-first, paginated), `listMatches()`;
+  plus `Message`/`Conversation`/`MatchSummary`/`OtherUser` types and
+  `otherUserPhotoUrl` / `otherUserName` helpers. Reuses the shared `apiClient`
+  (bearer token attached automatically).
+- `src/realtime/chatSocket.ts` — `useChatSocket` hook. Opens one Socket.IO
+  connection authenticating with the stored access token in the handshake
+  `auth.token` (the field the backend `io.use` reads), `transports: ['websocket']`.
+  Exposes `connectionState` (`connecting` / `connected` / `disconnected`),
+  `sendMessage` (promise that resolves on the server ack, rejects when offline or
+  the server rejects), `setTyping`, `markRead`. Listens for `message:receive`,
+  `typing`, `read`. Handlers are held in a ref so the socket opens once per mount,
+  not on every re-render.
+- `src/components/SafetyBanner.tsx` — the standing anti-scam reminder ("Never send
+  money to a match"), always visible at the top of the thread (brand mockup, spec
+  §8.5). On-brand orange tint, non-dismissible this slice.
+- `src/screens/ChatScreen.tsx` — resolves conversation → loads history → connects
+  socket. Inverted `FlatList` (newest at bottom), backward paging via
+  `onEndReached`. A message is "mine" iff `senderId !== otherUser.id` (a thread has
+  exactly two participants — no need for the app to know its own user id, which
+  `AuthContext` doesn't expose). Optimistic-free send (append on ack). Typing
+  indicator (debounced emit, 2s off), read receipts (Sent/Read on my bubbles;
+  `markRead` on open, on each inbound peer message). Per-message scam warning under
+  a `flagged` bubble, on top of the standing banner. Honest connection state: a
+  notice bar shows Connecting…/offline and the composer is disabled while not
+  connected, so a send is never silently dropped.
+- `src/screens/MatchesScreen.tsx` — minimal active-matches list (`GET /matches`):
+  avatar + name + verification tier, tap opens the chat. No last-message previews
+  (would need `GET /conversations`) — deliberately lightweight so a match dismissed
+  from the overlay is still reachable.
+
+**Navigation** (`src/navigation/types.ts`, `RootNavigator.tsx`):
+- New `AppStack` routes `Matches` (undefined) and `Chat`
+  (`{ matchId, otherUserName?, otherUserPhotoUrl? }` — the optional name/photo let
+  the header render instantly before the get-or-create round-trip resolves).
+- `Home` (Discover) header gains a **Matches** button on the left (Sign out stays
+  on the right).
+- The match overlay's **Send a message** button (`DiscoveryScreen`) navigates to
+  `Chat` with the `matchId` captured from the swipe response; **Keep swiping**
+  still dismisses. `matched` state widened from `Candidate` to
+  `{ candidate, matchId }` to carry the id.
+
+**Dependencies:** added `socket.io-client` (^4.8.3, matches backend `socket.io`).
+
+**Deviations from spec:**
+- Chat is keyed by `matchId` (not `conversationId`) at the navigation layer, since
+  that's all the overlay and `GET /matches` expose; the `conversationId` is an
+  internal detail resolved on open. Depends on the get-or-create endpoint above.
+- The matches list is intentionally minimal (no previews/unread). A richer inbox
+  over `GET /conversations` can come later; the user opted for the minimal list.
+- No token refresh: the app has no refresh-on-401 path today, so if the access
+  token expires mid-session the socket drops and the connection notice shows —
+  honest rather than silently broken. Reconnect on a fresh token (re-open screen).
+
+**Verification:** Mobile `tsc --noEmit` clean (strict). Not yet run on a device —
+per the user's request, handed over for a live run against the backend; wired to
+the real REST endpoints and the real Socket.IO contract and ready. The backend
+get-or-create endpoint it depends on is live-tested above (20 assertions).

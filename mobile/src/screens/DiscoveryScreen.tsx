@@ -10,6 +10,9 @@ import {
   View,
 } from 'react-native';
 
+import { useNavigation } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
+
 import { ApiError } from '../api/errors';
 import {
   Candidate,
@@ -19,7 +22,14 @@ import {
   VerificationTier,
 } from '../api/discovery';
 import { PrimaryButton } from '../components/PrimaryButton';
+import { AppStackParamList } from '../navigation/types';
 import { colors, spacing } from '../theme';
+
+// A formed match we can act on: the candidate to show in the confirmation, plus
+// the matchId the "Send a message" button needs to open the chat.
+type MatchedState = { candidate: Candidate; matchId: string };
+
+type DiscoveryNav = NativeStackNavigationProp<AppStackParamList, 'Home'>;
 
 // The real Home experience: a one-card-at-a-time discovery feed. Candidates come
 // from GET /discovery (paged); Pass/Like buttons POST /swipes; a mutual like
@@ -67,6 +77,7 @@ type Screen = 'loading' | 'ready' | 'error';
 export function DiscoveryScreen() {
   const { height } = useWindowDimensions();
   const photoHeight = Math.round(height * 0.42);
+  const navigation = useNavigation<DiscoveryNav>();
 
   // The loaded deck and a cursor into it. We keep swiped cards in the array and
   // just advance the cursor — simpler than splicing, and the backend already
@@ -86,7 +97,7 @@ export function DiscoveryScreen() {
   // In-flight swipe + any resulting match to confirm, and a transient banner for
   // a swipe that failed (so we don't advance past an un-recorded decision).
   const [swiping, setSwiping] = useState(false);
-  const [matched, setMatched] = useState<Candidate | null>(null);
+  const [matched, setMatched] = useState<MatchedState | null>(null);
   const [swipeError, setSwipeError] = useState<string | null>(null);
 
   const current: Candidate | undefined = deck[cursor];
@@ -146,8 +157,9 @@ export function DiscoveryScreen() {
     try {
       const res = await postSwipe(current.userId, action);
       // Show the match confirmation for a mutual like, then advance either way so
-      // dismissing the confirmation reveals the next card.
-      if (res.isMatch) setMatched(current);
+      // dismissing the confirmation reveals the next card. Capture the matchId from
+      // the swipe response — the overlay's "Send a message" needs it to open a chat.
+      if (res.isMatch && res.match) setMatched({ candidate: current, matchId: res.match._id });
       setCursor((c) => c + 1);
     } catch (e) {
       const err = e as ApiError;
@@ -308,15 +320,36 @@ export function DiscoveryScreen() {
     <>
       {body}
       {matched ? (
-        <MatchOverlay candidate={matched} onDismiss={() => setMatched(null)} />
+        <MatchOverlay
+          candidate={matched.candidate}
+          onDismiss={() => setMatched(null)}
+          onSendMessage={() => {
+            const { candidate, matchId } = matched;
+            setMatched(null);
+            navigation.navigate('Chat', {
+              matchId,
+              otherUserName: candidate.name,
+              otherUserPhotoUrl: primaryPhotoUrl(candidate),
+            });
+          }}
+        />
       ) : null}
     </>
   );
 }
 
 // A simple full-screen match confirmation shown over the deck when a like is
-// mutual. Dismissing returns to the next card underneath.
-function MatchOverlay({ candidate, onDismiss }: { candidate: Candidate; onDismiss: () => void }) {
+// mutual. "Send a message" opens the chat for this match; "Keep swiping" dismisses
+// and returns to the next card underneath.
+function MatchOverlay({
+  candidate,
+  onDismiss,
+  onSendMessage,
+}: {
+  candidate: Candidate;
+  onDismiss: () => void;
+  onSendMessage: () => void;
+}) {
   const photoUrl = primaryPhotoUrl(candidate);
   return (
     <View style={styles.matchOverlay}>
@@ -326,8 +359,16 @@ function MatchOverlay({ candidate, onDismiss }: { candidate: Candidate; onDismis
       </Text>
       {photoUrl ? <Image source={{ uri: photoUrl }} style={styles.matchPhoto} /> : null}
       <View style={styles.matchButton}>
-        <PrimaryButton title="Keep swiping" onPress={onDismiss} />
+        <PrimaryButton title="Send a message" onPress={onSendMessage} />
       </View>
+      <Pressable
+        onPress={onDismiss}
+        hitSlop={8}
+        accessibilityRole="button"
+        style={styles.matchSecondary}
+      >
+        <Text style={styles.matchSecondaryText}>Keep swiping</Text>
+      </Pressable>
     </View>
   );
 }
@@ -545,5 +586,14 @@ const styles = StyleSheet.create({
   matchButton: {
     alignSelf: 'stretch',
     marginTop: spacing.xl,
+  },
+  matchSecondary: {
+    marginTop: spacing.md,
+    padding: spacing.sm,
+  },
+  matchSecondaryText: {
+    color: colors.textMuted,
+    fontSize: 15,
+    fontWeight: '700',
   },
 });
