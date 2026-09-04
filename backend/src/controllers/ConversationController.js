@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
+const Match = require('../models/Match');
 const User = require('../models/User');
 const Profile = require('../models/Profile');
 
@@ -28,6 +29,25 @@ function publicProfile(profile) {
     const obj = profile.toObject();
     delete obj.discoverySettings;
     return obj;
+}
+
+// Shape one Conversation for the requester `me`, resolving the OTHER participant
+// with their derived verificationTier (spec §4.7 — the chat screen shows the
+// badge, so it's always present, even when null) and public profile. Mirrors
+// MatchController.shapeMatch; the list batch-loads users/profiles, the
+// get-or-create endpoint loads the single other side.
+function shapeConversation(conversation, me, otherUser, otherProfile) {
+    const otherId = String(conversation.participants.find((p) => String(p) !== me));
+    return {
+        id: conversation._id,
+        matchId: conversation.matchId,
+        lastMessageAt: conversation.lastMessageAt,
+        otherUser: {
+            id: otherId,
+            verificationTier: otherUser ? otherUser.verificationTier : null,
+            profile: publicProfile(otherProfile),
+        },
+    };
 }
 
 // GET /conversations
@@ -57,23 +77,78 @@ async function listConversations(req, res) {
 
     const payload = conversations.map((c) => {
         const otherId = String(c.participants.find((p) => String(p) !== me));
-        const otherUser = userById.get(otherId);
-        const otherProfile = profileByUserId.get(otherId);
-        return {
-            id: c._id,
-            matchId: c.matchId,
-            lastMessageAt: c.lastMessageAt,
-            otherUser: {
-                id: otherId,
-                verificationTier: otherUser ? otherUser.verificationTier : null,
-                profile: publicProfile(otherProfile),
-            },
-        };
+        return shapeConversation(c, me, userById.get(otherId), profileByUserId.get(otherId));
     });
 
     return res.json({
         viewerVerificationTier: req.user.verificationTier,
         conversations: payload,
+    });
+}
+
+// POST /matches/:id/conversation
+// Get-or-create the chat thread for a match the requester is part of. The Match is
+// created when two users mutually like (SwipeController), but its Conversation is
+// created lazily here — on first open — so matches nobody chats on never spawn an
+// empty thread. Idempotent: the unique index on Conversation.matchId means a match
+// has exactly one conversation, and calling this repeatedly always returns that
+// same one (201 on the create, 200 on every subsequent hit).
+//
+// 404s if the match doesn't exist OR isn't one of the requester's — deliberately
+// indistinguishable (a malformed id 404s too, not a cast error), the same
+// info-leak-safe posture as GET /matches/:id and the message read layer, so this
+// can't be used to probe whether an arbitrary match id exists. Returns the same
+// shape as one entry of GET /conversations.
+async function getOrCreateConversation(req, res) {
+    const me = req.userId;
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+        return res.status(404).json({ error: 'Match not found' });
+    }
+
+    // Scope the lookup to matches the requester is part of, so someone else's
+    // match reads as "not found" rather than leaking its existence.
+    const match = await Match.findOne({
+        _id: id,
+        $or: [{ userA: me }, { userB: me }],
+    });
+    if (!match) {
+        return res.status(404).json({ error: 'Match not found' });
+    }
+
+    // Look for the existing thread first so we can report 201-vs-200 honestly.
+    let conversation = await Conversation.findOne({ matchId: match._id });
+    let created = false;
+    if (!conversation) {
+        // participants mirror the match pair (denormalised — see Conversation model).
+        try {
+            conversation = await Conversation.create({
+                matchId: match._id,
+                participants: [match.userA, match.userB],
+            });
+            created = true;
+        } catch (err) {
+            // Duplicate key on the unique matchId index — a concurrent open won the
+            // race and created it first; re-read the now-existing thread. Keeps this
+            // idempotent under two devices opening the same match at once.
+            if (err.code === 11000) {
+                conversation = await Conversation.findOne({ matchId: match._id });
+            } else {
+                throw err;
+            }
+        }
+    }
+
+    const otherId = String(match.userA) === me ? String(match.userB) : String(match.userA);
+    const [otherUser, otherProfile] = await Promise.all([
+        User.findById(otherId),
+        Profile.findOne({ userId: otherId }),
+    ]);
+
+    return res.status(created ? 201 : 200).json({
+        viewerVerificationTier: req.user.verificationTier,
+        conversation: shapeConversation(conversation, me, otherUser, otherProfile),
     });
 }
 
@@ -130,5 +205,6 @@ async function listMessages(req, res) {
 
 module.exports = {
     listConversations,
+    getOrCreateConversation,
     listMessages,
 };

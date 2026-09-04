@@ -83,6 +83,12 @@ routes.get('/matches/:id', auth, asyncHandler(MatchController.getMatch));
 routes.get('/conversations', auth, asyncHandler(ConversationController.listConversations));
 routes.get('/conversations/:id/messages', auth, asyncHandler(ConversationController.listMessages));
 
+// Get-or-create the conversation for a match the requester is part of (spec §6).
+// The Match forms on a mutual like; its Conversation is created lazily here, on
+// first chat open. Idempotent (unique matchId) and participant-scoped — a foreign
+// or missing match id 404s indistinguishably, same posture as GET /matches/:id.
+routes.post('/matches/:id/conversation', auth, asyncHandler(ConversationController.getOrCreateConversation));
+
 // Subscription read layer (spec §6, §7). Authenticated, read-only: returns the
 // caller's current plan + status, defaulting to the free plan when there's no
 // Subscription row yet. Makes no payment call. Paystack/StoreKit init, verify,

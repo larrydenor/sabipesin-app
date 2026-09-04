@@ -14,6 +14,8 @@ import { OtpEntryScreen } from '../screens/OtpEntryScreen';
 import { ProfileSetupScreen } from '../screens/ProfileSetupScreen';
 import { PhotoUploadScreen } from '../screens/PhotoUploadScreen';
 import { DiscoveryScreen } from '../screens/DiscoveryScreen';
+import { MatchesScreen } from '../screens/MatchesScreen';
+import { ChatScreen } from '../screens/ChatScreen';
 
 const AuthStack = createNativeStackNavigator<AuthStackParamList>();
 const AppStack = createNativeStackNavigator<AppStackParamList>();
@@ -136,16 +138,37 @@ function AppFlow() {
       <AppStack.Screen
         name="Home"
         component={DiscoveryScreen}
-        options={{
+        options={({ navigation }) => ({
           title: 'Discover',
-          // Sign-out lived on the old Home placeholder; keep it reachable now
-          // that discovery owns this route.
+          // Matches list lives to the left; sign-out (which lived on the old Home
+          // placeholder) stays on the right now that discovery owns this route.
+          headerLeft: () => (
+            <Pressable
+              onPress={() => navigation.navigate('Matches')}
+              hitSlop={8}
+              accessibilityRole="button"
+            >
+              <Text style={styles.headerAction}>Matches</Text>
+            </Pressable>
+          ),
           headerRight: () => (
             <Pressable onPress={signOut} hitSlop={8} accessibilityRole="button">
               <Text style={styles.headerAction}>Sign out</Text>
             </Pressable>
           ),
-        }}
+        })}
+      />
+      <AppStack.Screen
+        name="Matches"
+        component={MatchesScreen}
+        options={{ title: 'Matches' }}
+      />
+      <AppStack.Screen
+        name="Chat"
+        component={ChatScreen}
+        // Title is set from the passed-in name for an instant header, then
+        // refreshed by the screen once the conversation resolves.
+        options={({ route }) => ({ title: route.params.otherUserName || 'Chat' })}
       />
     </AppStack.Navigator>
   );

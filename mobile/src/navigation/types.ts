@@ -13,4 +13,11 @@ export type AppStackParamList = {
   ProfileSetup: undefined;
   PhotoUpload: undefined;
   Home: undefined;
+  // The active-matches list (GET /matches); each row opens Chat.
+  Matches: undefined;
+  // A conversation, reached from the match overlay or the matches list. Keyed by
+  // matchId — the chat resolves the conversationId via POST /matches/:id/conversation
+  // on open. The optional name/photo let the header render instantly before that
+  // round-trip resolves; the screen still refreshes them from the response.
+  Chat: { matchId: string; otherUserName?: string; otherUserPhotoUrl?: string | null };
 };
