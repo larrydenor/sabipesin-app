@@ -20,6 +20,17 @@ export type ProfilePhoto = {
   isPrimary: boolean;
 };
 
+// The owner's discovery filters, managed only by PUT /profile/discovery-settings.
+// `ageRange` is absent on a profile that has never set it (the schema has no
+// default for it, unlike the other two). Stripped from OTHER users' profiles by
+// the backend, but returned in full on GET /profile/me — so this is safe to read
+// for the current user.
+export type DiscoverySettings = {
+  showOnlyNinVerified: boolean;
+  maxDistanceKm: number;
+  ageRange?: { min: number; max: number };
+};
+
 // The subset of the Profile model this screen reads/writes. The backend returns
 // the full document; we only type what we use.
 export type Profile = {
@@ -36,6 +47,10 @@ export type Profile = {
   // Managed by the photo endpoints (POST/DELETE /profile/photos), not PUT
   // /profile/me. Absent on a freshly-created profile until the first upload.
   photos?: ProfilePhoto[];
+  // Managed by PUT /profile/discovery-settings. Present on GET /profile/me for
+  // the owner (the schema defaults showOnlyNinVerified/maxDistanceKm), though
+  // `ageRange` may be undefined until first set.
+  discoverySettings?: DiscoverySettings;
 };
 
 // PUT /profile/me accepts any subset of the writable fields (it upserts). We only
@@ -116,6 +131,28 @@ export async function uploadProfilePhoto(photo: PhotoUpload): Promise<Profile> {
 // FULL updated profile (200).
 export async function deleteProfilePhoto(photoId: string): Promise<Profile> {
   const { data } = await apiClient.delete<Profile>(`/profile/photos/${photoId}`);
+  return data;
+}
+
+// PUT /profile/discovery-settings input. Every field is optional server-side
+// (only the provided ones are written), but the settings screen sends all three
+// to keep the saved filters == the form state.
+export type UpdateDiscoverySettingsInput = {
+  showOnlyNinVerified?: boolean;
+  maxDistanceKm?: number;
+  ageRange?: { min: number; max: number };
+};
+
+// PUT /profile/discovery-settings — the ONLY write path allowed to set
+// showOnlyNinVerified, because it enforces the reciprocity rule: enabling the
+// NIN-only filter requires the caller to be NIN-verified. When they aren't, the
+// backend responds 403 with `{ code: 'NIN_REQUIRED' }` and persists nothing —
+// callers should inspect `err.status === 403 && err.code === 'NIN_REQUIRED'`.
+// Returns the full updated profile on success.
+export async function updateDiscoverySettings(
+  input: UpdateDiscoverySettingsInput,
+): Promise<Profile> {
+  const { data } = await apiClient.put<Profile>('/profile/discovery-settings', input);
   return data;
 }
 

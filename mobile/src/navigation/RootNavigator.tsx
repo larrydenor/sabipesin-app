@@ -14,6 +14,7 @@ import { OtpEntryScreen } from '../screens/OtpEntryScreen';
 import { ProfileSetupScreen } from '../screens/ProfileSetupScreen';
 import { PhotoUploadScreen } from '../screens/PhotoUploadScreen';
 import { DiscoveryScreen } from '../screens/DiscoveryScreen';
+import { DiscoverySettingsScreen } from '../screens/DiscoverySettingsScreen';
 import { MatchesScreen } from '../screens/MatchesScreen';
 import { ChatScreen } from '../screens/ChatScreen';
 
@@ -151,12 +152,28 @@ function AppFlow() {
               <Text style={styles.headerAction}>Matches</Text>
             </Pressable>
           ),
+          // Filter icon (left of Sign out) opens the discovery-settings form.
           headerRight: () => (
-            <Pressable onPress={signOut} hitSlop={8} accessibilityRole="button">
-              <Text style={styles.headerAction}>Sign out</Text>
-            </Pressable>
+            <View style={styles.headerRightRow}>
+              <Pressable
+                onPress={() => navigation.navigate('DiscoverySettings')}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Discovery filters"
+              >
+                <Text style={styles.headerIcon}>⚙</Text>
+              </Pressable>
+              <Pressable onPress={signOut} hitSlop={8} accessibilityRole="button">
+                <Text style={styles.headerAction}>Sign out</Text>
+              </Pressable>
+            </View>
           ),
         })}
+      />
+      <AppStack.Screen
+        name="DiscoverySettings"
+        component={DiscoverySettingsScreen}
+        options={{ title: 'Filters' }}
       />
       <AppStack.Screen
         name="Matches"
@@ -228,6 +245,16 @@ const styles = StyleSheet.create({
   headerAction: {
     color: colors.primary,
     fontSize: 15,
+    fontWeight: '700',
+  },
+  headerRightRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  headerIcon: {
+    color: colors.primary,
+    fontSize: 18,
     fontWeight: '700',
   },
 });
