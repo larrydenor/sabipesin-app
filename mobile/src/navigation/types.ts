@@ -13,6 +13,9 @@ export type AppStackParamList = {
   ProfileSetup: undefined;
   PhotoUpload: undefined;
   Home: undefined;
+  // Discovery filters (PUT /profile/discovery-settings), reached from the
+  // Discover header's filter icon.
+  DiscoverySettings: undefined;
   // The active-matches list (GET /matches); each row opens Chat.
   Matches: undefined;
   // A conversation, reached from the match overlay or the matches list. Keyed by

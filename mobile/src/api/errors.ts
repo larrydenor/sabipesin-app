@@ -18,6 +18,13 @@ export class ApiError extends Error {
   readonly retryAfterSeconds: number | null;
   /** Remaining OTP attempts, when the backend reports it on a wrong code. */
   readonly attemptsLeft: number | null;
+  /**
+   * A machine-readable error code the backend sometimes attaches alongside the
+   * human message (e.g. `NIN_REQUIRED` on the 403 from PUT
+   * /profile/discovery-settings). Lets a screen branch on the specific reason
+   * without matching the message text.
+   */
+  readonly code: string | null;
 
   constructor(params: {
     message: string;
@@ -25,6 +32,7 @@ export class ApiError extends Error {
     status: number | null;
     retryAfterSeconds?: number | null;
     attemptsLeft?: number | null;
+    code?: string | null;
   }) {
     super(params.message);
     this.name = 'ApiError';
@@ -32,6 +40,7 @@ export class ApiError extends Error {
     this.status = params.status;
     this.retryAfterSeconds = params.retryAfterSeconds ?? null;
     this.attemptsLeft = params.attemptsLeft ?? null;
+    this.code = params.code ?? null;
   }
 }
 
@@ -74,7 +83,9 @@ export function toApiError(error: unknown): ApiError {
     }
 
     const status = response.status;
-    const data = response.data as { error?: string; attemptsLeft?: number } | undefined;
+    const data = response.data as
+      | { error?: string; attemptsLeft?: number; code?: string }
+      | undefined;
     const message =
       (typeof data?.error === 'string' && data.error) ||
       'Something went wrong. Please try again.';
@@ -86,6 +97,7 @@ export function toApiError(error: unknown): ApiError {
       retryAfterSeconds:
         status === 429 ? parseRetryAfter(response.headers?.['retry-after'], message) : null,
       attemptsLeft: typeof data?.attemptsLeft === 'number' ? data.attemptsLeft : null,
+      code: typeof data?.code === 'string' ? data.code : null,
     });
   }
 

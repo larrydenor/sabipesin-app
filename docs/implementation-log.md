@@ -6,6 +6,51 @@ feature, committed together with that feature's code.
 
 ---
 
+## Mobile — discovery settings (filters) screen
+
+**Built:** A simple filters form for the current user's discovery preferences,
+reached from the Discover header, writing to `PUT /profile/discovery-settings`.
+
+- **Screen** (`src/screens/DiscoverySettingsScreen.tsx`): loads the current
+  settings from `GET /profile/me` (the owner's `discoverySettings` is returned in
+  full — only stripped from *other* users' profiles), prefilling three controls:
+  - `showOnlyNinVerified` → a `Switch`.
+  - `maxDistanceKm` → number input (digits only), validated `> 0`; defaults to 25.
+  - `ageRange` → min/max number inputs, validated `min >= 18` and `min <= max`;
+    defaults 18–60 when the profile has never set a range (the schema has no
+    default for `ageRange`, unlike the other two fields).
+  On save, sends all three fields (backend applies only what's provided; sending
+  all keeps saved == form). Success pops back to Discover.
+- **NIN reciprocity (403 `NIN_REQUIRED`)**: enabling the NIN-only filter without
+  being NIN-verified returns `403 { code: 'NIN_REQUIRED' }` and persists nothing.
+  The screen shows a clear inline notice under the toggle explaining the
+  requirement and flips the toggle back off (so a follow-up Save still persists
+  the distance/age changes). It deliberately does **not** navigate to a
+  verification flow — none exists on mobile yet; the notice says it's coming.
+- **Navigation** (`src/navigation/{types,RootNavigator}.tsx`): new `AppStack`
+  route `DiscoverySettings` (title "Filters"). The Discover (`Home`) header gains
+  a ⚙ filter icon in `headerRight`, left of the existing Sign out.
+- **API layer**:
+  - `src/api/profile.ts` — added `DiscoverySettings` type, `discoverySettings?`
+    on `Profile`, and `updateDiscoverySettings()`.
+  - `src/api/errors.ts` — `ApiError` now carries the backend's machine-readable
+    `code` (populated from the response body), so the screen branches on
+    `status === 403 && code === 'NIN_REQUIRED'` instead of matching message text.
+
+**Deviations / limitations:**
+- The open Discover deck does **not** re-query when filters change — `DiscoveryScreen`
+  only fetches on mount, and returning to it doesn't remount. New filters take
+  effect on the next deck load/refresh. Acceptable for this slice; a future pass
+  can refresh the deck on focus.
+- Numeric fields use plain text inputs (digits-only) rather than a slider/stepper —
+  keeps the dependency footprint unchanged, consistent with `ProfileSetupScreen`'s
+  dependency-free `dob` input.
+
+**Verification:** Mobile `tsc --noEmit` clean (strict). Not yet run on a device —
+handed over for a live run against the backend.
+
+---
+
 ## Mobile — profile creation screen + post-sign-in routing (+ gender enum & opposite-sex discovery filter)
 
 **Built:** After sign-in the app now decides where to land by asking the backend
