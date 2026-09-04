@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { NavigationContainer, DefaultTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
@@ -13,7 +13,7 @@ import { PhoneEntryScreen } from '../screens/PhoneEntryScreen';
 import { OtpEntryScreen } from '../screens/OtpEntryScreen';
 import { ProfileSetupScreen } from '../screens/ProfileSetupScreen';
 import { PhotoUploadScreen } from '../screens/PhotoUploadScreen';
-import { HomeScreen } from '../screens/HomeScreen';
+import { DiscoveryScreen } from '../screens/DiscoveryScreen';
 
 const AuthStack = createNativeStackNavigator<AuthStackParamList>();
 const AppStack = createNativeStackNavigator<AppStackParamList>();
@@ -133,7 +133,20 @@ function AppFlow() {
         component={PhotoUploadScreen}
         options={{ title: 'Add photos', headerBackVisible: false, gestureEnabled: false }}
       />
-      <AppStack.Screen name="Home" component={HomeScreen} options={{ title: 'SabiPesin' }} />
+      <AppStack.Screen
+        name="Home"
+        component={DiscoveryScreen}
+        options={{
+          title: 'Discover',
+          // Sign-out lived on the old Home placeholder; keep it reachable now
+          // that discovery owns this route.
+          headerRight: () => (
+            <Pressable onPress={signOut} hitSlop={8} accessibilityRole="button">
+              <Text style={styles.headerAction}>Sign out</Text>
+            </Pressable>
+          ),
+        }}
+      />
     </AppStack.Navigator>
   );
 }
@@ -188,5 +201,10 @@ const styles = StyleSheet.create({
   },
   errorSignOut: {
     marginTop: spacing.md,
+  },
+  headerAction: {
+    color: colors.primary,
+    fontSize: 15,
+    fontWeight: '700',
   },
 });

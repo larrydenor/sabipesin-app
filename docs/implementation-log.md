@@ -1033,3 +1033,67 @@ forces Home); (D) complete, 0 photos →PhotoUpload; (E) complete +1 photo →Ho
 partially-filled profile that already has a photo). Test user/profile fixtures
 deleted afterward; DB confirmed restored (4 users, 0 profiles). Mobile
 `tsc --noEmit` clean.
+
+## Mobile — discovery feed (`DiscoveryScreen`, replaces the Home placeholder)
+
+**Built:** the real Home experience a user with a complete profile + ≥1 photo
+lands on after the onboarding gate — a one-card-at-a-time discovery feed wired to
+the live `GET /discovery` and `POST /swipes` endpoints. No swipe-gesture physics
+yet (buttons only, by request); gesture-based swiping is a later polish pass.
+
+- **API layer** (`src/api/discovery.ts`, new): `getDiscovery(page)` →
+  `{ page, limit, hasMore, candidates }` and `postSwipe(targetId, action)` →
+  `{ isMatch, match }`. Types (`Candidate`, `VerificationTier`, `SwipeAction`, …)
+  mirror `DiscoveryController.shapeCandidate` / `SwipeController`; `ProfilePhoto`,
+  `Gender`, `LookingFor` are reused from `api/profile.ts` (single source of truth).
+- **Screen** (`src/screens/DiscoveryScreen.tsx`, new):
+  - **Card.** Primary photo (falls back to first photo, then a "No photo"
+    placeholder), name + age, location (`lga, state`), bio, and interest chips.
+  - **Verification badge** overlaid on the photo — `✓✓ NIN Verified` (filled
+    orange) vs `✓ Phone Verified` (subtle outline). Derived from the candidate's
+    `user.verificationTier`; a core trust signal, always shown (discovery only
+    returns phone-verified-or-better users, so the badge is never absent).
+  - **Age** computed from `dob` client-side (whole years; omitted for missing /
+    unparseable / out-of-range dates rather than showing junk).
+  - **Pass / Like** buttons `POST /swipes` with `action: 'pass' | 'like'` and
+    `targetId = candidate.userId` (the USER id the backend expects, **not** the
+    profile `_id`). Buttons disable while a swipe is in flight; a failed swipe
+    shows an inline banner and does **not** advance (the decision wasn't recorded).
+  - **Match confirmation.** On `isMatch: true` a full-screen "It's a match!"
+    overlay (their photo + name) appears over the deck; "Keep swiping" dismisses
+    it to reveal the next card — never a silent advance.
+  - **Paging.** Loads page 1 on mount; prefetches the next page when the cursor is
+    within two cards of the end (`hasMore` gates it). Swiped cards stay in the
+    array and the cursor just advances — the backend excludes already-swiped users
+    from later pages, so no risk of re-showing.
+  - **Empty pool** (deck exhausted, `hasMore` false): a clear "You're all caught
+    up" message with a Refresh button — never a blank screen. While later pages
+    are still loading, a spinner shows instead of a premature empty state.
+  - **Error handling.** A failed *first* load is a full-screen retriable error; a
+    failed *prefetch* is swallowed (current deck stays usable, retried on the next
+    advance).
+- **Navigation** (`src/navigation/RootNavigator.tsx`): the `Home` route now
+  renders `DiscoveryScreen` (title "Discover") instead of the placeholder
+  `HomeScreen`, which is deleted. Sign-out — previously the placeholder's only
+  action — moves to a header-right button on the route so it stays reachable. The
+  route name stays `Home` (the onboarding gate and `AppStackParamList` are
+  unchanged).
+
+**API contract consumed** (matches `DiscoveryController` / `SwipeController`):
+- `GET /discovery?page=` — `200 { page, limit, hasMore, candidates[] }`; each
+  candidate carries the profile fields + a public `user`
+  `{ id, verificationTier, phoneVerifiedAt, ninVerifiedAt }`.
+- `POST /swipes { targetId, action }` — `201 { swipe, isMatch, match }`;
+  `targetId` is the candidate's user id; `action ∈ { like, pass, superlike }`
+  (this slice sends only `like`/`pass`).
+
+**Notes / deviations:**
+- No gesture physics this slice (explicitly deferred) — Pass/Like buttons only.
+- `superlike` is typed in the API layer but unused (no button yet).
+- Placeholder photo path is defensive only — discovery candidates normally have
+  photos; the gate requires the *requester* to have ≥1, and the backend doesn't
+  currently filter candidates by photo count.
+
+**Verification:** Mobile `tsc --noEmit` clean. Not yet run on a device — handed to
+the user to run live against the backend (their request); wired to the real
+endpoints and ready.
