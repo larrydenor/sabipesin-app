@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
+import { useHeaderHeight } from '@react-navigation/elements';
 
 import { ApiError } from '../api/errors';
 import { Gender, LookingFor, parseFieldErrors, updateMyProfile, UpdateProfileInput } from '../api/profile';
@@ -65,6 +66,12 @@ function validateDob(value: string): string | null {
 }
 
 export function ProfileSetupScreen({ navigation }: Props) {
+  // The screen sits under a native-stack header. Without feeding that header
+  // height back to KeyboardAvoidingView, `behavior="padding"` mis-computes the
+  // avoided area once the keyboard opens and the ScrollView can't scroll far
+  // enough to reach the fields/tags/submit button below the fold.
+  const headerHeight = useHeaderHeight();
+
   const [name, setName] = useState('');
   const [dob, setDob] = useState('');
   const [gender, setGender] = useState<Gender | null>(null);
@@ -157,6 +164,7 @@ export function ProfileSetupScreen({ navigation }: Props) {
     <KeyboardAvoidingView
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={headerHeight}
     >
       <ScrollView
         contentContainerStyle={styles.scroll}
