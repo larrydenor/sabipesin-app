@@ -5,6 +5,7 @@ const Message = require('../models/Message');
 const Match = require('../models/Match');
 const User = require('../models/User');
 const Profile = require('../models/Profile');
+const { blockedUserIds } = require('../utils/blocks');
 
 // Pagination bounds. Not in the spec — sensible defaults so a client can't ask
 // for an unbounded page. Mirrors DiscoveryController.
@@ -59,8 +60,18 @@ function shapeConversation(conversation, me, otherUser, otherProfile) {
 async function listConversations(req, res) {
     const me = req.userId;
 
-    const conversations = await Conversation.find({ participants: me })
+    const allConversations = await Conversation.find({ participants: me })
         .sort({ lastMessageAt: -1 });
+
+    // Soft-exclude blocked pairs (spec safety / App Store Guideline 1.2): a
+    // conversation whose other participant is on either side of a block is hidden
+    // from the list, but its Conversation (and Message) documents are deliberately
+    // NOT deleted — kept for moderation/audit and restored if the block is lifted.
+    const blocked = new Set(await blockedUserIds(me));
+    const conversations = allConversations.filter((c) => {
+        const otherId = String(c.participants.find((p) => String(p) !== me));
+        return !blocked.has(otherId);
+    });
 
     // The "other" participant in each conversation is whichever id isn't the
     // requester. A conversation always has the two match participants.

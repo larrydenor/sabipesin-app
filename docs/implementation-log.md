@@ -6,6 +6,56 @@ feature, committed together with that feature's code.
 
 ---
 
+## Backend — Report / Block, Chunk 3: blocking wired into existing flows
+
+**Built:** A block now hides the two users from each other across discovery,
+match/conversation listings, and live messaging. The rule is applied from one
+shared helper, `src/utils/blocks.js`:
+- `blockedUserIds(userId)` → de-duped hex ids on either side of a block with the
+  user (they blocked, or were blocked).
+- `isBlockedBetween(a, b)` → boolean, either direction.
+
+Call sites (all treat a block as mutual in effect — either direction hides both):
+- **`GET /discovery`** — blocked ids are added to the existing `$nin` exclusion
+  alongside already-swiped ids. Converted to real `ObjectId`s because the discovery
+  aggregation's `$match` does not cast query values.
+- **`GET /matches`** / **`GET /conversations`** — results are **soft-excluded**
+  in memory after the query; the underlying `Match`/`Conversation` (and `Message`)
+  documents are deliberately **kept** for moderation/audit and reappear intact when
+  the block is lifted. Nothing is deleted.
+- **Socket `message:send`** — after the existing conversation-membership re-auth,
+  a live `isBlockedBetween` check refuses to send between blocked users (checked per
+  message, not cached on connect, so a mid-session block takes effect immediately).
+
+**Deliberately scoped out (flagging):** the spec named only `GET /matches` and
+`GET /conversations` for soft-exclusion, so the by-id read endpoints —
+`GET /matches/:id`, `GET /conversations/:id/messages`, and
+`POST /matches/:id/conversation` — are **not** block-gated in this slice. A blocked
+pair is gone from every list and can't exchange new messages, but an already-known
+id could still deep-read the stale detail/history. Easy to extend with the same
+helper if we want the by-id routes gated too; left out here to stay within the
+spec's stated scope.
+
+**Verification:** 31/31 assertions against the local backend + mongod + real
+socket.io clients. Baseline (unblocked) discovery/matches/conversations/socket both
+directions all work; after Joe blocks Girl, she's gone from Joe's discovery, the
+match is gone from **both** users' `/matches`, the thread is gone from **both**
+`/conversations`, and socket sends are refused **both** directions — while the
+Match and Conversation docs remain in the DB. After unblock, discovery, matches,
+conversations, and messaging all reappear and function. Finally a fresh
+swipe→match→get-or-create-conversation→socket-send flow (Al/Bella) confirms the
+normal non-blocked path is unbroken.
+
+Additionally re-run against the **real Atlas dev DB** with the actual Joe Blog /
+Girl Blog accounts once this environment's IP was allowlisted — 27/27, using a
+non-destructive harness that snapshots and restores everything it touches
+(temporarily removes Joe's swipe so discovery is testable, then re-creates it;
+deletes its own smoke messages and restores `conversation.lastMessageAt`; leaves
+zero blocks). Post-run inspection confirmed the pair identical to its pre-test
+state (same Match + Conversation, both `like` swipes, no blocks).
+
+---
+
 ## Backend — Report / Block, Chunk 2: endpoints
 
 **Built:** REST endpoints for reporting and blocking, in `SafetyController.js`,
