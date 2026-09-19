@@ -6,6 +6,35 @@ feature, committed together with that feature's code.
 
 ---
 
+## Backend — Report / Block, Chunk 1: models (App Store Guideline 1.2 safety)
+
+**Built:** `Report` and `Block` Mongoose models — the data layer for user
+reporting and blocking (spec safety requirement / App Store Guideline 1.2).
+
+- **`Report`** (`src/models/Report.js`): `reporterId` + `reportedUserId` (both
+  `ObjectId ref User`, required, directional), `reason` (enum: `inappropriate_photos`,
+  `harassment`, `scam_attempt`, `fake_profile`, `underage`, `other`), `details`
+  (optional, `maxlength: 1000`), `status` (enum `pending`/`reviewed`/`actioned`/
+  `dismissed`, default `pending`), timestamps. No unique index — repeat reports of
+  the same user are distinct incidents. The `reason`/`status` enums are exported on
+  the model (`Report.REASONS`/`Report.STATUSES`) so the controller's `INVALID_REASON`
+  check reuses the schema's list instead of duplicating it.
+- **`Block`** (`src/models/Block.js`): `blockerId` + `blockedUserId` (both
+  `ObjectId ref User`, required, **directional** — not the canonical sorted pair
+  Match uses, since A→B and B→A are distinct facts that can coexist), timestamps.
+  Unique compound index on `(blockerId, blockedUserId)`: a repeat block collides
+  with code 11000, treated as success by the controller — the same idempotent-by-
+  design pattern as Swipe/Match.
+
+**Verification:** Atlas is unreachable from the build environment (its egress IP
+isn't on the Atlas Network Access allowlist — TCP connects, TLS handshake rejected
+with alert 80), so model-layer smoke tests ran against a local `mongod` seeded to
+mirror the Joe/Girl dev accounts. 9/9 assertions passed: default `status=pending`,
+enum + `maxlength` + `required` validation, the 11000 collision on a duplicate
+block, and reverse-direction blocks allowed.
+
+---
+
 ## Mobile — discovery settings (filters) screen
 
 **Built:** A simple filters form for the current user's discovery preferences,
