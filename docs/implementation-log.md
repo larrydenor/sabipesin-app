@@ -6,6 +6,38 @@ feature, committed together with that feature's code.
 
 ---
 
+## Backend — Report / Block, Chunk 2: endpoints
+
+**Built:** REST endpoints for reporting and blocking, in `SafetyController.js`,
+wired in `routes.js` (all behind `auth`, matching `req.user`/`req.userId`).
+
+- **`POST /users/:id/report`** `{ reason, details? }` → 201 `{ report }`. Rejects
+  self-report (400 `CANNOT_REPORT_SELF`) and invalid reason (400 `INVALID_REASON`,
+  validated against `Report.REASONS`); unknown target → 404; `details` > 1000 chars
+  → 400 via schema validation. Creating a report has **no** side effects on
+  matching/discovery/messaging.
+- **`POST /users/:id/block`** → 201 (new) / 200 (already blocked) `{ block }`.
+  Rejects self-block (400 `CANNOT_BLOCK_SELF`). A duplicate collides on the unique
+  index (11000) and is treated as success — idempotent, same pattern as swipe/
+  conversation create.
+- **`DELETE /users/:id/block`** → 200 `{ message, removed }`. Idempotent — removing
+  an absent block still succeeds with `removed:false`.
+- **`GET /users/blocked`** → 200 `{ blocked: [{ id, blockedAt, user: { id,
+  profile: { name, photos } } }] }`, newest first. Profiles are batch-loaded by
+  `userId` (Block refs `User`; profile data lives in the `Profile` collection) and
+  only basic fields (`name`, and `photos` mapped to `{ url, isPrimary }`) are
+  exposed — no private `discoverySettings`. Registered before the `/users/:id/*`
+  routes so the literal path can't be shadowed by an `:id` match.
+
+**Verification:** 19/19 HTTP assertions passed against the local backend + mongod
+(real auth via minted access tokens): both self-guards, `INVALID_REASON`, a valid
+report persisted with correct fields, 404 on unknown target, over-long details
+rejected, block 201-then-200 idempotency with exactly one doc surviving, the
+blocked list populated with the blocked user's name + photos, clean DELETE +
+idempotent re-DELETE, and the 401 auth guard.
+
+---
+
 ## Backend — Report / Block, Chunk 1: models (App Store Guideline 1.2 safety)
 
 **Built:** `Report` and `Block` Mongoose models — the data layer for user

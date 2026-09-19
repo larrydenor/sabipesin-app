@@ -11,6 +11,7 @@ const VerificationController = require('./controllers/VerificationController');
 const SubscriptionController = require('./controllers/SubscriptionController');
 const PurchasesController = require('./controllers/PurchasesController');
 const PaymentsController = require('./controllers/PaymentsController');
+const SafetyController = require('./controllers/SafetyController');
 const authMiddleware = require('./middlewares/auth');
 const asyncHandler = require('./utils/asyncHandler');
 
@@ -118,5 +119,16 @@ routes.post('/purchases/superlike/paystack', auth, asyncHandler(PurchasesControl
 // Transaction (boost/super like) — routing on the metadata `type` — and it's
 // idempotent on the charge reference so Paystack's retries don't double-apply.
 routes.post('/payments/webhook/paystack', asyncHandler(PaymentsController.paystackWebhook));
+
+// Safety: report + block (App Store Guideline 1.2 / spec safety). Authenticated.
+// `/users/blocked` is registered before the parameterized `/users/:id/*` routes so
+// the literal path can never be shadowed by an `:id` match. Report is a pure audit
+// record with no matching/discovery/messaging side effects; Block is idempotent
+// (a repeat block is treated as success) and its effect on discovery/matches/
+// conversations/messaging is wired in a later slice.
+routes.get('/users/blocked', auth, asyncHandler(SafetyController.listBlocked));
+routes.post('/users/:id/report', auth, asyncHandler(SafetyController.reportUser));
+routes.post('/users/:id/block', auth, asyncHandler(SafetyController.blockUser));
+routes.delete('/users/:id/block', auth, asyncHandler(SafetyController.unblockUser));
 
 module.exports = routes;
