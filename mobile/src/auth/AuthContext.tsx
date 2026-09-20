@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 
 import { clearTokens, getTokens, saveTokens, TokenPair } from './tokenStorage';
+import { registerSignOutHandler } from '../api/client';
 
 // Holds the app's auth state and the actions that change it. The navigator reads
 // `isAuthenticated` to decide between the auth stack and the app stack, so
@@ -52,6 +53,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }),
     [isAuthenticated, isBootstrapping],
   );
+
+  // Give the REST client a way to force a sign-out (client.ts's response
+  // interceptor, on a 401 it can't recover from a refresh for) without it
+  // importing this module — `signOut` only exists as state inside this
+  // provider, there's nothing to import at the top level.
+  useEffect(() => {
+    registerSignOutHandler(value.signOut);
+    return () => registerSignOutHandler(null);
+  }, [value.signOut]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

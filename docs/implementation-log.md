@@ -1641,3 +1641,102 @@ existing posture for access tokens.
 **Not built (later chunks, per the brief):** mobile's REST interceptor (401 →
 call `/auth/refresh` → retry) and the socket's reconnect-with-fresh-token path.
 Until those land, mobile behavior is unchanged from before this chunk.
+
+---
+
+## Token refresh — mobile REST interceptor (Chunk 2 of 3)
+
+**Why:** Chunk 1 built `POST /auth/refresh`, but nothing on mobile called it.
+`ApiError.kind` also had no `'unauthorized'` case — `kindForStatus` bucketed
+every non-429 4xx (including a real 401) as `'validation'`, so an expired
+access token on, say, profile save would have been silently routed into
+`parseFieldErrors` as if it were a field error. This chunk fixes both, REST
+only — the Socket.IO reconnect path (`chatSocket.ts`) is untouched, per the
+brief; it's Chunk 3.
+
+**`errors.ts`:** added `'unauthorized'` to `ApiErrorKind`; `kindForStatus`
+returns it for 401 (checked ahead of the `>= 400` catch-all that used to claim
+it). Audited every reader of `.kind` before changing this (asked for, not
+assumed): `ProfileSetupScreen.tsx` and `profile.ts`'s `parseFieldErrors` both
+already fell back to `{ _form: err.message }` for any non-`'validation'` kind,
+so reclassifying 401 produces byte-identical rendered output at both sites.
+`OtpEntryScreen.tsx` only checks `'rate_limited'`, unaffected. Nothing needed
+flagging — no screen-level behavior changed beyond the interceptor itself.
+
+**`client.ts` — refresh-and-retry:** the response interceptor now branches on
+a genuine 401 only (nothing else). On the first 401 for a given request: calls
+`POST /auth/refresh` with the stored refresh token, saves the returned pair via
+the existing `saveTokens`, and retries the original request once (a `_retried`
+marker stashed on the axios config prevents a second attempt if the retry
+itself 401s — that case goes straight to sign-out, no second refresh). On any
+refresh failure — the backend's 401 `INVALID_REFRESH_TOKEN`, or no refresh
+token in storage at all — clears tokens and calls the sign-out handler
+registered by `AuthContext`, reusing its existing `signOut()` (which already
+clears tokens and flips `isAuthenticated`, and per its own header comment is
+what swaps the navigator to the auth stack — no new sign-out mechanism
+invented). Concurrent 401s (e.g. a screen firing several calls at once) share
+ONE in-flight refresh via a module-level `refreshPromise` — every 401 that
+lands while a refresh is pending awaits that same promise and retries with
+whatever it produces, instead of racing separate refresh calls against the
+backend's rotation (Chunk 1) and losing.
+
+The refresh call itself is a bare `axios.post` (not `apiClient`) so it can
+never recurse through this same interceptor. Refactored it to read the base
+URL off `apiClient.defaults.baseURL` rather than the separately-imported
+`API_BASE_URL` constant — one source of truth, and it's what let the smoke
+test below point the whole client at a local test server without touching
+`config/env.ts`.
+
+**`AuthContext.tsx`:** added `registerSignOutHandler(value.signOut)` in a
+`useEffect` (unregistered on unmount). `client.ts` can't import `signOut`
+directly — it only exists as state inside the provider, not a top-level
+export — so the provider hands the interceptor a reference to call instead.
+
+**Test infrastructure (none existed):** the mobile project had no test runner
+at all (`tsc --noEmit` was the only script). Added `jest` + `jest-expo` +
+`@types/jest` as devDependencies and a `test` script, since simulating "401 →
+refresh → retry" and the concurrency/dedupe case needs to exercise real
+in-flight requests, not just type-checking. `jest.config.js` overrides
+`testEnvironment` to plain `'node'` (from jest-expo's default RN-emulating
+environment): that environment hardcodes the `react-native` package export
+condition, which resolves `axios` to its XHR-based browser bundle — under Jest
+that adapter never does real network I/O, so every request came back a generic
+"network" error regardless of what the test server did. Plain `node` gives
+axios its real `http`-based adapter. This only affects how test files resolve
+modules — the app's own Metro/Expo build is untouched.
+
+**Deviation found and fixed while building the test, not before:** originally
+tried to point the test server at the client via
+`process.env.EXPO_PUBLIC_API_BASE_URL`, set at runtime in `beforeAll` before
+requiring `client.ts`. That doesn't work — confirmed by isolating it to a
+throwaway module — because `babel-preset-expo` statically inlines
+`EXPO_PUBLIC_*` vars at transform time, so a runtime `process.env` write has
+no effect on the already-compiled `config/env.ts`. Switched to overriding
+`apiClient.defaults.baseURL` directly after import, which is what motivated
+the `performRefresh` refactor above (it has to follow the same override).
+
+**Smoke test** (`src/api/__tests__/client.test.ts`, real `apiClient` against a
+real local `http.createServer`, `expo-secure-store` swapped for an in-memory
+Map since there's no device under Jest — nothing else mocked):
+- 401 → refresh succeeds → original request retried with the new token →
+  caller sees only the eventual 200. New token pair confirmed persisted via
+  `tokenStorage.getTokens()`.
+- 401 → refresh call itself 401s (`INVALID_REFRESH_TOKEN`) → registered
+  sign-out handler called exactly once, tokens cleared, exactly one attempt at
+  the original request (no retry attempted).
+- 3 concurrent requests all 401 at once → exactly one `/auth/refresh` call
+  (asserted via a server-side counter) → all 3 retry successfully with the
+  resulting token.
+- A retry that itself comes back 401 → exactly one refresh call total (not
+  two), sign-out triggered, no loop.
+- A real 400 validation error → `kind: 'validation'`, no refresh attempted,
+  `parseFieldErrors` output unchanged (`{ dob: 'Cast to Date failed for value
+  "x" at path \`dob\`' }`) — confirms the existing field-error path is
+  byte-for-byte unaffected by this chunk.
+
+All 5 pass (`npx jest`, `--no-cache` re-run to rule out stale-cache effects).
+`tsc --noEmit` clean (strict) across the whole project, unchanged.
+
+**Not built (Chunk 3):** `chatSocket.ts`'s reconnect-with-fresh-token path.
+Until that lands, an expired access token still drops the socket into a silent
+reconnect loop exactly as before this chunk — only REST calls self-heal now.

@@ -6,6 +6,7 @@ import axios from 'axios';
 // the human message; `message` is the backend's own text, safe to show as-is.
 export type ApiErrorKind =
   | 'validation' // 400 — bad phone format, missing/invalid code, expired code
+  | 'unauthorized' // 401 — missing/expired/invalid credential
   | 'rate_limited' // 429 — cooldown or hourly cap
   | 'server' // 5xx — includes 502 when the SMS provider fails
   | 'network' // request never got a response (offline, wrong base URL, CORS)
@@ -45,6 +46,7 @@ export class ApiError extends Error {
 }
 
 function kindForStatus(status: number): ApiErrorKind {
+  if (status === 401) return 'unauthorized';
   if (status === 429) return 'rate_limited';
   if (status >= 500) return 'server';
   if (status >= 400) return 'validation';
