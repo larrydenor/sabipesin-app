@@ -6,6 +6,34 @@ feature, committed together with that feature's code.
 
 ---
 
+## Backend — Report / Block, Chunk 3 follow-up: block-gate the by-id read routes
+
+**Built:** Extended the block rule to the three by-id routes that Chunk 3 had left
+out, using the same `isBlockedBetween` helper. A blocked pair's match/conversation
+now reads as **404 "not found"** — deliberately the same response as a
+foreign/missing id, so these routes still can't be used to probe existence and are
+consistent with the list endpoints hiding the pair and the socket refusing sends.
+
+- **`GET /matches/:id`** (`MatchController.getMatch`) → 404 when blocked (either
+  direction), checked right after the match is loaded.
+- **`GET /conversations/:id/messages`** (`ConversationController.listMessages`) →
+  404 when blocked, checked after the conversation membership lookup.
+- **`POST /matches/:id/conversation`** (`getOrCreateConversation`) → 404 when
+  blocked, checked **before** the lazy get-or-create so no conversation is spun up
+  for a blocked pair. (The pre-existing `otherId` is now computed once, up front,
+  and reused.)
+
+The underlying Match/Conversation docs are still never deleted. This supersedes the
+"Deliberately scoped out" note in the Chunk 3 entry below.
+
+**Verification:** 17/17 against the real Atlas dev DB (Joe/Girl), non-destructive
+(adds then removes a single block; the get-or-create is idempotent so nothing is
+created): baseline all three routes 200; while blocked all three 404 in **both**
+directions with the Match + Conversation docs intact; after unblock all three 200
+again; no leftover block.
+
+---
+
 ## Backend — Report / Block, Chunk 3: blocking wired into existing flows
 
 **Built:** A block now hides the two users from each other across discovery,

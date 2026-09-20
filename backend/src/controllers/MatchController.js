@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const Match = require('../models/Match');
 const User = require('../models/User');
 const Profile = require('../models/Profile');
-const { blockedUserIds } = require('../utils/blocks');
+const { blockedUserIds, isBlockedBetween } = require('../utils/blocks');
 
 // Strip a candidate/other user's private discoverySettings before returning
 // their profile — those are theirs alone.
@@ -103,6 +103,14 @@ async function getMatch(req, res) {
     }
 
     const otherId = String(match.userA) === me ? String(match.userB) : String(match.userA);
+
+    // Block gate (spec safety / App Store Guideline 1.2): a blocked pair's match
+    // reads as "not found" — same info-leak-safe posture as a foreign/missing id,
+    // and consistent with GET /matches soft-excluding it from the list.
+    if (await isBlockedBetween(me, otherId)) {
+        return res.status(404).json({ error: 'Match not found' });
+    }
+
     const [otherUser, otherProfile] = await Promise.all([
         User.findById(otherId),
         Profile.findOne({ userId: otherId }),

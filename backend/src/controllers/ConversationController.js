@@ -5,7 +5,7 @@ const Message = require('../models/Message');
 const Match = require('../models/Match');
 const User = require('../models/User');
 const Profile = require('../models/Profile');
-const { blockedUserIds } = require('../utils/blocks');
+const { blockedUserIds, isBlockedBetween } = require('../utils/blocks');
 
 // Pagination bounds. Not in the spec — sensible defaults so a client can't ask
 // for an unbounded page. Mirrors DiscoveryController.
@@ -128,6 +128,14 @@ async function getOrCreateConversation(req, res) {
         return res.status(404).json({ error: 'Match not found' });
     }
 
+    // Block gate (spec safety / App Store Guideline 1.2): a blocked pair's match
+    // reads as "not found" — don't reveal it, and don't lazily spin up a
+    // conversation for it. Consistent with GET /matches and GET /matches/:id.
+    const otherId = String(match.userA) === me ? String(match.userB) : String(match.userA);
+    if (await isBlockedBetween(me, otherId)) {
+        return res.status(404).json({ error: 'Match not found' });
+    }
+
     // Look for the existing thread first so we can report 201-vs-200 honestly.
     let conversation = await Conversation.findOne({ matchId: match._id });
     let created = false;
@@ -151,7 +159,6 @@ async function getOrCreateConversation(req, res) {
         }
     }
 
-    const otherId = String(match.userA) === me ? String(match.userB) : String(match.userA);
     const [otherUser, otherProfile] = await Promise.all([
         User.findById(otherId),
         Profile.findOne({ userId: otherId }),
@@ -183,6 +190,14 @@ async function listMessages(req, res) {
     // conversation that isn't theirs reads as "not found" rather than leaking it.
     const conversation = await Conversation.findOne({ _id: id, participants: me });
     if (!conversation) {
+        return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    // Block gate (spec safety / App Store Guideline 1.2): a blocked pair's
+    // conversation reads as "not found" — consistent with GET /conversations
+    // soft-excluding it and the socket refusing sends.
+    const otherId = String(conversation.participants.find((p) => String(p) !== me));
+    if (await isBlockedBetween(me, otherId)) {
         return res.status(404).json({ error: 'Conversation not found' });
     }
 
