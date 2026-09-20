@@ -48,5 +48,8 @@ app.use(errorHandler);
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 initSocket(io);
+// Expose io to route handlers via req.app.get('io') — DELETE /account uses it to
+// force-disconnect a deleted user's already-open socket(s).
+app.set('io', io);
 
 server.listen(PORT, () => console.log(`Server listening on port ${PORT}`));

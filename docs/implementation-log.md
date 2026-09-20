@@ -6,6 +6,153 @@ feature, committed together with that feature's code.
 
 ---
 
+## Backend — Account Deletion, Chunk 2: DELETE /account (destructive)
+
+**Built:** `DELETE /account` (App Store Guideline 5.1.1(v)), in
+`AccountController.deleteAccount`, wired in `routes.js` behind `auth`. Deletes ONLY
+the caller's own account — the target is always `req.userId`, there is deliberately
+no admin/other-user deletion path. Immediate hard delete, no grace period.
+
+**Cascade (the caller's own data):**
+- **Cloudinary photos** — every `photo.publicId` on the caller's Profile is deleted
+  with a real `cloudinary.uploader.destroy` call, reusing the existing
+  `services/cloudinary.deleteImage` (the same helper `DELETE /profile/photos/:id`
+  uses). Each delete is awaited and verified — `deleteImage` throws `CloudinaryError`
+  (→ 502) on a real failure and treats an already-missing asset as success; nothing
+  is fire-and-forget.
+- **Profile** document.
+- **Swipe** documents where the caller is either party (`actorId` OR `targetId`).
+- **User** document.
+
+**Deliberately KEPT:** Match / Conversation / Message documents — shared with the
+other party, who retains an intact audit trail. The deleted user is instead
+soft-excluded from that side's view by Chunk 1 (`utils/accounts.js`). Same posture
+as Report/Block keeping docs and soft-excluding.
+
+**Ordering (partial-failure safety, mirrors `ProfileController.deletePhoto`):**
+Cloudinary assets are deleted FIRST, so a storage failure aborts (502) before any DB
+document is touched; the User document is deleted LAST, so if an earlier DB step
+fails the account still exists and the request can simply be retried (a re-deleted
+Cloudinary asset reads as "not found" = success). Intentionally NOT wrapped in a
+Mongo transaction — the rest of the codebase doesn't use them (they need a replica
+set, unavailable on a standalone mongod), and this ordering gives graceful
+degradation without one.
+
+**Session invalidation:** there is no token blacklist — access tokens are stateless
+JWTs. Deleting the User document IS the invalidation: `middlewares/auth` does a live
+`User.findById` on every request (and the socket handshake does the same in
+`socket/index.js`), so once the User is gone every existing REST request and every
+new/reconnecting socket fails with 401 / "User no longer exists" — immediately, not
+bounded by the 15-min token expiry. No new mechanism was invented for that (per the
+brief, this was checked and matched rather than replaced).
+
+The one path that live-lookup did NOT cover was a socket **already open at the moment
+of deletion**: the handshake authorizes once at connect time, and the per-event
+handlers aren't re-checked against the sender, so that connection would otherwise
+keep working for its whole lifetime (not bounded by token expiry). Closed by
+force-disconnecting the user's live socket(s) at the end of the cascade: each
+authenticated socket joins a room named after its userId (`socket/index.js`), so
+`req.app.get('io').in(userId).disconnectSockets(true)` evicts every device
+immediately (`true` closes the transport so the client sees a real disconnect).
+`server.js` now exposes `io` via `app.set('io', io)`. Deliberately NOT a per-event
+`isUserDeleted(me)` re-check in `messageHandlers.js` — disconnect-at-deletion-time is
+the chosen approach, keeping the hot message path free of an extra lookup.
+
+**Response:** `200 { message: 'Account deleted', deleted: { profile, photos,
+swipes } }` — 200-with-body, consistent with the `DELETE /users/:id/block`
+precedent. No idempotency handling is needed: once the User is gone the auth gate
+401s any repeat call, so the endpoint can't be re-entered by the deleted user.
+
+**Deliberately out of scope (flagging):** the cascade is exactly the set named in
+the brief (User, Profile, Swipes, photos). Other rows that reference the user —
+`Block`, `Report`, `Subscription`, `Transaction`, and the incoming `Report`s naming
+them as `reportedUserId` — are left intact, consistent with the "keep the shared/
+audit records" philosophy (a report or block against a since-deleted user is still a
+moderation record). Flag if any of those should also be purged.
+
+**Verification:** 28/28 assertions against the LOCAL backend + local mongod (NEVER
+Atlas — a real delete has no undo, unlike block/unblock) using a single DISPOSABLE
+throwaway user (never Joe/Girl). Two REAL 1×1 PNGs were uploaded to Cloudinary for
+that user, then after `DELETE /account`: the response is 200 with the correct counts
+(profile true, 2 photos, 2 swipes); the User/Profile/both-direction Swipe docs are
+gone from the DB; **both photos are confirmed gone via the Cloudinary Admin API**
+(`cloudinary.api.resource` → 404), not merely by a successful DB call; the Match/
+Conversation/both Messages the user shared with a "keeper" are untouched in the DB;
+the keeper's `GET /matches`, `GET /conversations`, both by-id routes, and a socket
+send all now soft-exclude/404/refuse the deleted user (Chunk 1); the deleted user's
+old JWT returns 401 on `GET /matches` and a repeat `DELETE /account`; and a full
+`POST /swipes` → mutual match → get-or-create conversation → socket `message:send`
+regression for two other fresh users still works untouched. The disposable user, its
+Cloudinary assets, and the local test DB were all torn down after the run.
+
+The non-transactional cascade's retry safety was separately proven (21/21, local
+mongod): a run interrupted right after the Cloudinary step but before the Profile
+delete leaves the DB untouched (User/Profile/Swipes intact) with the photos already
+gone; a retry then completes cleanly (200), re-processing the already-gone assets
+with no throw (Cloudinary "not found" = success) and ending in exactly the state of
+an uninterrupted delete.
+
+The already-open-socket disconnect was proven with a REAL socket.io client (12/12,
+local mongod): a live authenticated socket that had just sent-and-delivered a message
+fires a client-side `disconnect` (reason `io server disconnect`) the instant
+`DELETE /account` returns — not on next reconnect — while a second user's socket is
+unaffected, and a reconnect with the old token still fails the handshake with "User
+no longer exists".
+
+---
+
+## Backend — Account Deletion, Chunk 1: deleted-account soft-exclusion
+
+**Built:** The read-side filter for account deletion (App Store Guideline
+5.1.1(v)). Account deletion HARD-deletes a user's OWN User/Profile/Swipe docs and
+Cloudinary photos (Chunk 2), but deliberately KEEPS the shared Match/Conversation/
+Message docs for the other party's audit trail — the exact same soft-exclude
+posture as Report/Block. So the other party must stop seeing/reaching a deleted
+user across the same surfaces a block already touches. New shared helper,
+`src/utils/accounts.js`, the deletion-side analogue of `src/utils/blocks.js`:
+- `isUserDeleted(userId)` → boolean; true when the id has no `User` document. The
+  one-off analogue of `isBlockedBetween`, for the by-id read routes and the live
+  socket send. (There is no Block row to consult — a deleted user is simply one
+  whose `User` doc is gone.)
+
+Call sites (each mirrors the block gate placed right beside it):
+- **`GET /matches/:id`** / **`GET /conversations/:id/messages`** /
+  **`POST /matches/:id/conversation`** — `isUserDeleted(otherId)` → **404**, the
+  same info-leak-safe "not found" as a blocked pair, checked immediately after the
+  existing block gate. The get-or-create case also declines to spin up a thread.
+- **Socket `message:send`** — a live `isUserDeleted` check refuses to send to a
+  deleted counterpart (checked per message, not cached on connect), right after the
+  block gate.
+- **`GET /matches`** / **`GET /conversations`** — soft-excluded **in memory** after
+  the query. These endpoints already batch-load the other participants' `User`
+  docs, so a deleted user is simply absent from that map; the pair is filtered out
+  there for **free** (no extra query) — the list-side analogue of `blockedUserIds`.
+  The Match/Conversation/Message docs are deliberately KEPT.
+
+**Deliberately unchanged — `GET /discovery` (flagging):** unlike a block (where the
+blocked user still has live User+Profile docs, so their id must be explicitly added
+to the `$nin`), a deleted user has NO Profile row to surface and NO User doc, so the
+discovery aggregation's existing inner join (`$lookup` on User → `$unwind: '$user'`,
+plus `'user.status': 'active'`) already excludes them under any state — including a
+partial-failure state where the User is gone but a Profile lingers. Adding an
+existence filter here would be dead code, so discovery is left as-is; the smoke test
+still asserts a deleted user never appears in it.
+
+This chunk deletes NOTHING — it is purely a read-side filter, the same risk profile
+as Report/Block Chunk 3.
+
+**Verification:** 23/23 assertions against the LOCAL backend + local mongod (never
+Atlas). A "deleted" user is simulated as a leftover Match/Conversation/Message whose
+other participant has no User doc — the exact state Chunk 2 produces. From Joe's
+view: the ghost pair is hidden from `GET /matches` and `GET /conversations` (exactly
+one, the real Joe↔Girl pair, remains), the three by-id routes 404 for the ghost and
+200 for Girl, `message:send` to the ghost thread is refused (and persists nothing)
+while the Girl thread still accepts, and the ghost never appears in `GET /discovery`
+(Eve does). The underlying ghost Match/Conversation/Message docs are confirmed still
+present afterward (audit trail intact).
+
+---
+
 ## Backend — Report / Block, Chunk 3 follow-up: block-gate the by-id read routes
 
 **Built:** Extended the block rule to the three by-id routes that Chunk 3 had left

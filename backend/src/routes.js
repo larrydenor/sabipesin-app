@@ -12,6 +12,7 @@ const SubscriptionController = require('./controllers/SubscriptionController');
 const PurchasesController = require('./controllers/PurchasesController');
 const PaymentsController = require('./controllers/PaymentsController');
 const SafetyController = require('./controllers/SafetyController');
+const AccountController = require('./controllers/AccountController');
 const authMiddleware = require('./middlewares/auth');
 const asyncHandler = require('./utils/asyncHandler');
 
@@ -130,5 +131,12 @@ routes.get('/users/blocked', auth, asyncHandler(SafetyController.listBlocked));
 routes.post('/users/:id/report', auth, asyncHandler(SafetyController.reportUser));
 routes.post('/users/:id/block', auth, asyncHandler(SafetyController.blockUser));
 routes.delete('/users/:id/block', auth, asyncHandler(SafetyController.unblockUser));
+
+// Account deletion (App Store Guideline 5.1.1(v)). Authenticated; deletes ONLY the
+// caller's own account (the target is always req.userId — no admin/other-user path).
+// Hard-deletes the caller's User/Profile/Swipe docs and Cloudinary photos; the
+// shared Match/Conversation/Message docs are deliberately kept for the other party's
+// audit trail (that side soft-excludes the deleted user via utils/accounts.js).
+routes.delete('/account', auth, asyncHandler(AccountController.deleteAccount));
 
 module.exports = routes;

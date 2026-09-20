@@ -4,6 +4,7 @@ const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
 const { isScammy } = require('../utils/antiScam');
 const { isBlockedBetween } = require('../utils/blocks');
+const { isUserDeleted } = require('../utils/accounts');
 
 // Serialize a Message the same shape GET /conversations/:id/messages returns, so
 // a client renders a socket-delivered message identically to a fetched one.
@@ -63,6 +64,14 @@ function registerMessageHandlers(io, socket) {
             // has blocked the other. Checked live (not cached on connect) so a block
             // placed mid-session takes effect on the very next message.
             if (await isBlockedBetween(me, otherParticipant(conversation, me))) {
+                return typeof ack === 'function' && ack({ ok: false, error: 'Messaging is unavailable with this user' });
+            }
+
+            // Deleted-account gate (App Store Guideline 5.1.1(v)): refuse to send if
+            // the other participant deleted their account. Checked live (not cached
+            // on connect), the same posture as the block gate above — a deletion
+            // mid-session takes effect on the very next message.
+            if (await isUserDeleted(otherParticipant(conversation, me))) {
                 return typeof ack === 'function' && ack({ ok: false, error: 'Messaging is unavailable with this user' });
             }
 
