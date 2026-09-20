@@ -6,6 +6,7 @@ const Match = require('../models/Match');
 const User = require('../models/User');
 const Profile = require('../models/Profile');
 const { blockedUserIds, isBlockedBetween } = require('../utils/blocks');
+const { isUserDeleted } = require('../utils/accounts');
 
 // Pagination bounds. Not in the spec — sensible defaults so a client can't ask
 // for an unbounded page. Mirrors DiscoveryController.
@@ -86,10 +87,17 @@ async function listConversations(req, res) {
     const userById = new Map(users.map((u) => [String(u._id), u]));
     const profileByUserId = new Map(profiles.map((p) => [String(p.userId), p]));
 
-    const payload = conversations.map((c) => {
-        const otherId = String(c.participants.find((p) => String(p) !== me));
-        return shapeConversation(c, me, userById.get(otherId), profileByUserId.get(otherId));
-    });
+    // Soft-exclude deleted accounts (App Store Guideline 5.1.1(v)): a conversation
+    // whose other participant deleted their account (no User doc) is hidden, exactly
+    // like a blocked pair above. We reuse the batch load just done — an absent user
+    // IS a deleted user — so there's no extra query. The Conversation and Message
+    // docs are deliberately KEPT for this side's audit trail.
+    const payload = conversations
+        .filter((c) => userById.has(String(c.participants.find((p) => String(p) !== me))))
+        .map((c) => {
+            const otherId = String(c.participants.find((p) => String(p) !== me));
+            return shapeConversation(c, me, userById.get(otherId), profileByUserId.get(otherId));
+        });
 
     return res.json({
         viewerVerificationTier: req.user.verificationTier,
@@ -133,6 +141,14 @@ async function getOrCreateConversation(req, res) {
     // conversation for it. Consistent with GET /matches and GET /matches/:id.
     const otherId = String(match.userA) === me ? String(match.userB) : String(match.userA);
     if (await isBlockedBetween(me, otherId)) {
+        return res.status(404).json({ error: 'Match not found' });
+    }
+
+    // Deleted-account gate (App Store Guideline 5.1.1(v)): if the other participant
+    // deleted their account, the match reads as "not found" — and, as with a block,
+    // don't lazily spin up a conversation for it. Consistent with GET /matches and
+    // GET /matches/:id hiding it.
+    if (await isUserDeleted(otherId)) {
         return res.status(404).json({ error: 'Match not found' });
     }
 
@@ -198,6 +214,14 @@ async function listMessages(req, res) {
     // soft-excluding it and the socket refusing sends.
     const otherId = String(conversation.participants.find((p) => String(p) !== me));
     if (await isBlockedBetween(me, otherId)) {
+        return res.status(404).json({ error: 'Conversation not found' });
+    }
+
+    // Deleted-account gate (App Store Guideline 5.1.1(v)): if the other participant
+    // deleted their account, the conversation reads as "not found" — consistent with
+    // GET /conversations hiding it and the socket refusing sends. The Conversation
+    // and its Messages are deliberately KEPT for this side's audit trail.
+    if (await isUserDeleted(otherId)) {
         return res.status(404).json({ error: 'Conversation not found' });
     }
 

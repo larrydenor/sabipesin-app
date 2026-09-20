@@ -4,6 +4,7 @@ const Match = require('../models/Match');
 const User = require('../models/User');
 const Profile = require('../models/Profile');
 const { blockedUserIds, isBlockedBetween } = require('../utils/blocks');
+const { isUserDeleted } = require('../utils/accounts');
 
 // Strip a candidate/other user's private discoverySettings before returning
 // their profile — those are theirs alone.
@@ -66,10 +67,20 @@ async function listMatches(req, res) {
     const userById = new Map(users.map((u) => [String(u._id), u]));
     const profileByUserId = new Map(profiles.map((p) => [String(p.userId), p]));
 
-    const payload = matches.map((m) => {
-        const otherId = String(m.userA) === me ? String(m.userB) : String(m.userA);
-        return shapeMatch(m, me, userById.get(otherId), profileByUserId.get(otherId));
-    });
+    // Soft-exclude deleted accounts (App Store Guideline 5.1.1(v)): a match whose
+    // other participant deleted their account (no User doc) is hidden, exactly like
+    // a blocked pair above. We reuse the batch load just done — an absent user IS a
+    // deleted user — so there's no extra query (the list-side analogue of the block
+    // set). The Match doc is deliberately KEPT for this side's audit trail.
+    const payload = matches
+        .filter((m) => {
+            const otherId = String(m.userA) === me ? String(m.userB) : String(m.userA);
+            return userById.has(otherId);
+        })
+        .map((m) => {
+            const otherId = String(m.userA) === me ? String(m.userB) : String(m.userA);
+            return shapeMatch(m, me, userById.get(otherId), profileByUserId.get(otherId));
+        });
 
     return res.json({
         // The viewer's own tier, so §4.7's "each participant" is fully satisfied.
@@ -108,6 +119,14 @@ async function getMatch(req, res) {
     // reads as "not found" — same info-leak-safe posture as a foreign/missing id,
     // and consistent with GET /matches soft-excluding it from the list.
     if (await isBlockedBetween(me, otherId)) {
+        return res.status(404).json({ error: 'Match not found' });
+    }
+
+    // Deleted-account gate (App Store Guideline 5.1.1(v)): if the other participant
+    // deleted their account, their match reads as "not found" — the same info-leak-
+    // safe 404 as a blocked pair, and consistent with GET /matches hiding it. The
+    // Match doc itself is kept (never deleted) for this side's audit trail.
+    if (await isUserDeleted(otherId)) {
         return res.status(404).json({ error: 'Match not found' });
     }
 

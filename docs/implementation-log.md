@@ -6,6 +6,58 @@ feature, committed together with that feature's code.
 
 ---
 
+## Backend — Account Deletion, Chunk 1: deleted-account soft-exclusion
+
+**Built:** The read-side filter for account deletion (App Store Guideline
+5.1.1(v)). Account deletion HARD-deletes a user's OWN User/Profile/Swipe docs and
+Cloudinary photos (Chunk 2), but deliberately KEEPS the shared Match/Conversation/
+Message docs for the other party's audit trail — the exact same soft-exclude
+posture as Report/Block. So the other party must stop seeing/reaching a deleted
+user across the same surfaces a block already touches. New shared helper,
+`src/utils/accounts.js`, the deletion-side analogue of `src/utils/blocks.js`:
+- `isUserDeleted(userId)` → boolean; true when the id has no `User` document. The
+  one-off analogue of `isBlockedBetween`, for the by-id read routes and the live
+  socket send. (There is no Block row to consult — a deleted user is simply one
+  whose `User` doc is gone.)
+
+Call sites (each mirrors the block gate placed right beside it):
+- **`GET /matches/:id`** / **`GET /conversations/:id/messages`** /
+  **`POST /matches/:id/conversation`** — `isUserDeleted(otherId)` → **404**, the
+  same info-leak-safe "not found" as a blocked pair, checked immediately after the
+  existing block gate. The get-or-create case also declines to spin up a thread.
+- **Socket `message:send`** — a live `isUserDeleted` check refuses to send to a
+  deleted counterpart (checked per message, not cached on connect), right after the
+  block gate.
+- **`GET /matches`** / **`GET /conversations`** — soft-excluded **in memory** after
+  the query. These endpoints already batch-load the other participants' `User`
+  docs, so a deleted user is simply absent from that map; the pair is filtered out
+  there for **free** (no extra query) — the list-side analogue of `blockedUserIds`.
+  The Match/Conversation/Message docs are deliberately KEPT.
+
+**Deliberately unchanged — `GET /discovery` (flagging):** unlike a block (where the
+blocked user still has live User+Profile docs, so their id must be explicitly added
+to the `$nin`), a deleted user has NO Profile row to surface and NO User doc, so the
+discovery aggregation's existing inner join (`$lookup` on User → `$unwind: '$user'`,
+plus `'user.status': 'active'`) already excludes them under any state — including a
+partial-failure state where the User is gone but a Profile lingers. Adding an
+existence filter here would be dead code, so discovery is left as-is; the smoke test
+still asserts a deleted user never appears in it.
+
+This chunk deletes NOTHING — it is purely a read-side filter, the same risk profile
+as Report/Block Chunk 3.
+
+**Verification:** 23/23 assertions against the LOCAL backend + local mongod (never
+Atlas). A "deleted" user is simulated as a leftover Match/Conversation/Message whose
+other participant has no User doc — the exact state Chunk 2 produces. From Joe's
+view: the ghost pair is hidden from `GET /matches` and `GET /conversations` (exactly
+one, the real Joe↔Girl pair, remains), the three by-id routes 404 for the ghost and
+200 for Girl, `message:send` to the ghost thread is refused (and persists nothing)
+while the Girl thread still accepts, and the ghost never appears in `GET /discovery`
+(Eve does). The underlying ghost Match/Conversation/Message docs are confirmed still
+present afterward (audit trail intact).
+
+---
+
 ## Backend — Report / Block, Chunk 3 follow-up: block-gate the by-id read routes
 
 **Built:** Extended the block rule to the three by-id routes that Chunk 3 had left
