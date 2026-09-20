@@ -6,6 +6,145 @@ feature, committed together with that feature's code.
 
 ---
 
+## Backend — Report / Block, Chunk 3 follow-up: block-gate the by-id read routes
+
+**Built:** Extended the block rule to the three by-id routes that Chunk 3 had left
+out, using the same `isBlockedBetween` helper. A blocked pair's match/conversation
+now reads as **404 "not found"** — deliberately the same response as a
+foreign/missing id, so these routes still can't be used to probe existence and are
+consistent with the list endpoints hiding the pair and the socket refusing sends.
+
+- **`GET /matches/:id`** (`MatchController.getMatch`) → 404 when blocked (either
+  direction), checked right after the match is loaded.
+- **`GET /conversations/:id/messages`** (`ConversationController.listMessages`) →
+  404 when blocked, checked after the conversation membership lookup.
+- **`POST /matches/:id/conversation`** (`getOrCreateConversation`) → 404 when
+  blocked, checked **before** the lazy get-or-create so no conversation is spun up
+  for a blocked pair. (The pre-existing `otherId` is now computed once, up front,
+  and reused.)
+
+The underlying Match/Conversation docs are still never deleted. This supersedes the
+"Deliberately scoped out" note in the Chunk 3 entry below.
+
+**Verification:** 17/17 against the real Atlas dev DB (Joe/Girl), non-destructive
+(adds then removes a single block; the get-or-create is idempotent so nothing is
+created): baseline all three routes 200; while blocked all three 404 in **both**
+directions with the Match + Conversation docs intact; after unblock all three 200
+again; no leftover block.
+
+---
+
+## Backend — Report / Block, Chunk 3: blocking wired into existing flows
+
+**Built:** A block now hides the two users from each other across discovery,
+match/conversation listings, and live messaging. The rule is applied from one
+shared helper, `src/utils/blocks.js`:
+- `blockedUserIds(userId)` → de-duped hex ids on either side of a block with the
+  user (they blocked, or were blocked).
+- `isBlockedBetween(a, b)` → boolean, either direction.
+
+Call sites (all treat a block as mutual in effect — either direction hides both):
+- **`GET /discovery`** — blocked ids are added to the existing `$nin` exclusion
+  alongside already-swiped ids. Converted to real `ObjectId`s because the discovery
+  aggregation's `$match` does not cast query values.
+- **`GET /matches`** / **`GET /conversations`** — results are **soft-excluded**
+  in memory after the query; the underlying `Match`/`Conversation` (and `Message`)
+  documents are deliberately **kept** for moderation/audit and reappear intact when
+  the block is lifted. Nothing is deleted.
+- **Socket `message:send`** — after the existing conversation-membership re-auth,
+  a live `isBlockedBetween` check refuses to send between blocked users (checked per
+  message, not cached on connect, so a mid-session block takes effect immediately).
+
+**Deliberately scoped out (flagging):** the spec named only `GET /matches` and
+`GET /conversations` for soft-exclusion, so the by-id read endpoints —
+`GET /matches/:id`, `GET /conversations/:id/messages`, and
+`POST /matches/:id/conversation` — are **not** block-gated in this slice. A blocked
+pair is gone from every list and can't exchange new messages, but an already-known
+id could still deep-read the stale detail/history. Easy to extend with the same
+helper if we want the by-id routes gated too; left out here to stay within the
+spec's stated scope.
+
+**Verification:** 31/31 assertions against the local backend + mongod + real
+socket.io clients. Baseline (unblocked) discovery/matches/conversations/socket both
+directions all work; after Joe blocks Girl, she's gone from Joe's discovery, the
+match is gone from **both** users' `/matches`, the thread is gone from **both**
+`/conversations`, and socket sends are refused **both** directions — while the
+Match and Conversation docs remain in the DB. After unblock, discovery, matches,
+conversations, and messaging all reappear and function. Finally a fresh
+swipe→match→get-or-create-conversation→socket-send flow (Al/Bella) confirms the
+normal non-blocked path is unbroken.
+
+Additionally re-run against the **real Atlas dev DB** with the actual Joe Blog /
+Girl Blog accounts once this environment's IP was allowlisted — 27/27, using a
+non-destructive harness that snapshots and restores everything it touches
+(temporarily removes Joe's swipe so discovery is testable, then re-creates it;
+deletes its own smoke messages and restores `conversation.lastMessageAt`; leaves
+zero blocks). Post-run inspection confirmed the pair identical to its pre-test
+state (same Match + Conversation, both `like` swipes, no blocks).
+
+---
+
+## Backend — Report / Block, Chunk 2: endpoints
+
+**Built:** REST endpoints for reporting and blocking, in `SafetyController.js`,
+wired in `routes.js` (all behind `auth`, matching `req.user`/`req.userId`).
+
+- **`POST /users/:id/report`** `{ reason, details? }` → 201 `{ report }`. Rejects
+  self-report (400 `CANNOT_REPORT_SELF`) and invalid reason (400 `INVALID_REASON`,
+  validated against `Report.REASONS`); unknown target → 404; `details` > 1000 chars
+  → 400 via schema validation. Creating a report has **no** side effects on
+  matching/discovery/messaging.
+- **`POST /users/:id/block`** → 201 (new) / 200 (already blocked) `{ block }`.
+  Rejects self-block (400 `CANNOT_BLOCK_SELF`). A duplicate collides on the unique
+  index (11000) and is treated as success — idempotent, same pattern as swipe/
+  conversation create.
+- **`DELETE /users/:id/block`** → 200 `{ message, removed }`. Idempotent — removing
+  an absent block still succeeds with `removed:false`.
+- **`GET /users/blocked`** → 200 `{ blocked: [{ id, blockedAt, user: { id,
+  profile: { name, photos } } }] }`, newest first. Profiles are batch-loaded by
+  `userId` (Block refs `User`; profile data lives in the `Profile` collection) and
+  only basic fields (`name`, and `photos` mapped to `{ url, isPrimary }`) are
+  exposed — no private `discoverySettings`. Registered before the `/users/:id/*`
+  routes so the literal path can't be shadowed by an `:id` match.
+
+**Verification:** 19/19 HTTP assertions passed against the local backend + mongod
+(real auth via minted access tokens): both self-guards, `INVALID_REASON`, a valid
+report persisted with correct fields, 404 on unknown target, over-long details
+rejected, block 201-then-200 idempotency with exactly one doc surviving, the
+blocked list populated with the blocked user's name + photos, clean DELETE +
+idempotent re-DELETE, and the 401 auth guard.
+
+---
+
+## Backend — Report / Block, Chunk 1: models (App Store Guideline 1.2 safety)
+
+**Built:** `Report` and `Block` Mongoose models — the data layer for user
+reporting and blocking (spec safety requirement / App Store Guideline 1.2).
+
+- **`Report`** (`src/models/Report.js`): `reporterId` + `reportedUserId` (both
+  `ObjectId ref User`, required, directional), `reason` (enum: `inappropriate_photos`,
+  `harassment`, `scam_attempt`, `fake_profile`, `underage`, `other`), `details`
+  (optional, `maxlength: 1000`), `status` (enum `pending`/`reviewed`/`actioned`/
+  `dismissed`, default `pending`), timestamps. No unique index — repeat reports of
+  the same user are distinct incidents. The `reason`/`status` enums are exported on
+  the model (`Report.REASONS`/`Report.STATUSES`) so the controller's `INVALID_REASON`
+  check reuses the schema's list instead of duplicating it.
+- **`Block`** (`src/models/Block.js`): `blockerId` + `blockedUserId` (both
+  `ObjectId ref User`, required, **directional** — not the canonical sorted pair
+  Match uses, since A→B and B→A are distinct facts that can coexist), timestamps.
+  Unique compound index on `(blockerId, blockedUserId)`: a repeat block collides
+  with code 11000, treated as success by the controller — the same idempotent-by-
+  design pattern as Swipe/Match.
+
+**Verification:** Atlas is unreachable from the build environment (its egress IP
+isn't on the Atlas Network Access allowlist — TCP connects, TLS handshake rejected
+with alert 80), so model-layer smoke tests ran against a local `mongod` seeded to
+mirror the Joe/Girl dev accounts. 9/9 assertions passed: default `status=pending`,
+enum + `maxlength` + `required` validation, the 11000 collision on a duplicate
+block, and reverse-direction blocks allowed.
+
+---
+
 ## Mobile — discovery settings (filters) screen
 
 **Built:** A simple filters form for the current user's discovery preferences,

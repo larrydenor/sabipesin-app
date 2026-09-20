@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const Conversation = require('../models/Conversation');
 const Message = require('../models/Message');
 const { isScammy } = require('../utils/antiScam');
+const { isBlockedBetween } = require('../utils/blocks');
 
 // Serialize a Message the same shape GET /conversations/:id/messages returns, so
 // a client renders a socket-delivered message identically to a fetched one.
@@ -55,6 +56,14 @@ function registerMessageHandlers(io, socket) {
             const conversation = await findOwnedConversation(conversationId, me);
             if (!conversation) {
                 return typeof ack === 'function' && ack({ ok: false, error: 'Conversation not found' });
+            }
+
+            // Block gate (spec safety / App Store Guideline 1.2): on top of the
+            // conversation-membership re-auth above, refuse to send if either party
+            // has blocked the other. Checked live (not cached on connect) so a block
+            // placed mid-session takes effect on the very next message.
+            if (await isBlockedBetween(me, otherParticipant(conversation, me))) {
+                return typeof ack === 'function' && ack({ ok: false, error: 'Messaging is unavailable with this user' });
             }
 
             // Anti-scam flagging (spec §8.5): scan but never block — a trip only

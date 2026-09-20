@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const Match = require('../models/Match');
 const User = require('../models/User');
 const Profile = require('../models/Profile');
+const { blockedUserIds, isBlockedBetween } = require('../utils/blocks');
 
 // Strip a candidate/other user's private discoverySettings before returning
 // their profile — those are theirs alone.
@@ -38,10 +39,20 @@ function shapeMatch(m, me, otherUser, otherProfile) {
 async function listMatches(req, res) {
     const me = req.userId;
 
-    const matches = await Match.find({
+    const allMatches = await Match.find({
         status: 'active',
         $or: [{ userA: me }, { userB: me }],
     }).sort({ matchedAt: -1 });
+
+    // Soft-exclude blocked pairs (spec safety / App Store Guideline 1.2): a match
+    // with a user on either side of a block is hidden from the list, but its Match
+    // document is deliberately NOT deleted — it's kept for moderation/audit and
+    // reappears intact if the block is lifted.
+    const blocked = new Set(await blockedUserIds(me));
+    const matches = allMatches.filter((m) => {
+        const otherId = String(m.userA) === me ? String(m.userB) : String(m.userA);
+        return !blocked.has(otherId);
+    });
 
     // The "other" user in each match is whichever side isn't the requester.
     const otherIds = matches.map((m) => (String(m.userA) === me ? m.userB : m.userA));
@@ -92,6 +103,14 @@ async function getMatch(req, res) {
     }
 
     const otherId = String(match.userA) === me ? String(match.userB) : String(match.userA);
+
+    // Block gate (spec safety / App Store Guideline 1.2): a blocked pair's match
+    // reads as "not found" — same info-leak-safe posture as a foreign/missing id,
+    // and consistent with GET /matches soft-excluding it from the list.
+    if (await isBlockedBetween(me, otherId)) {
+        return res.status(404).json({ error: 'Match not found' });
+    }
+
     const [otherUser, otherProfile] = await Promise.all([
         User.findById(otherId),
         Profile.findOne({ userId: otherId }),

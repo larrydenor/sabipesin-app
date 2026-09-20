@@ -4,6 +4,7 @@ const Profile = require('../models/Profile');
 const User = require('../models/User');
 const Swipe = require('../models/Swipe');
 const verificationTier = require('../utils/verificationTier');
+const { blockedUserIds } = require('../utils/blocks');
 
 // Pagination bounds. Not in the spec — sensible defaults so a client can't ask
 // for an unbounded page.
@@ -70,9 +71,16 @@ async function getDiscovery(req, res) {
     // whether it was a like, pass, or superlike.
     const swipedTargetIds = await Swipe.find({ actorId: req.userId }).distinct('targetId');
 
-    // Base match: not me, not already swiped.
+    // Users on either side of a block with the requester (they blocked them, or
+    // were blocked by them) — never surface them (spec safety / App Store Guideline
+    // 1.2). This runs raw through the aggregation below, which does NOT cast query
+    // values, so the ids must be real ObjectIds — same as swipedTargetIds.
+    const blockedIds = (await blockedUserIds(req.userId))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+    // Base match: not me, not already swiped, not blocked (either direction).
     const match = {
-        userId: { $ne: meId, $nin: swipedTargetIds },
+        userId: { $ne: meId, $nin: [...swipedTargetIds, ...blockedIds] },
     };
 
     // Opposite-sex matching (product decision): derive the target gender directly
