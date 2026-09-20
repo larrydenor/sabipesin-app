@@ -1,7 +1,8 @@
 import type { AddressInfo } from 'net';
 import http from 'http';
 
-import { apiClient, registerSignOutHandler } from '../client';
+import { apiClient } from '../client';
+import { registerSignOutHandler } from '../../auth/refreshSession';
 import * as tokenStorage from '../../auth/tokenStorage';
 import { parseFieldErrors } from '../profile';
 

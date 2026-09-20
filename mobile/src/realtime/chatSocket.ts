@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 
-import { API_BASE_URL } from '../config/env';
+import { apiClient } from '../api/client';
 import { getTokens } from '../auth/tokenStorage';
+import { forceSignOut, getOrStartRefresh } from '../auth/refreshSession';
 import { Message } from '../api/messaging';
 
 // The mobile half of the Socket.IO messaging contract (backend
@@ -40,6 +41,19 @@ export type ChatSocket = {
   markRead: (conversationId: string) => void;
 };
 
+// A rejected handshake (the backend's `io.use` calling `next(new Error(...))`
+// for a missing/expired/invalid token, or a user that's gone/suspended —
+// src/socket/index.js) surfaces on the client as a plain `Error` with no
+// `.type`. A transport-level failure (offline, wrong host, server down)
+// surfaces instead as socket.io-client's own `TransportError`, which DOES
+// carry `.type === 'TransportError'`. Verified directly against the real
+// backend (see docs/implementation-log.md): socket.io-client's Manager
+// auto-retries the latter on its own, but by design does NOT retry a
+// rejected handshake at all — left alone, that case just goes silently dead.
+function isHandshakeAuthRejection(err: Error): boolean {
+  return (err as Error & { type?: string }).type !== 'TransportError';
+}
+
 export function useChatSocket(handlers: Handlers): ChatSocket {
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const socketRef = useRef<Socket | null>(null);
@@ -53,6 +67,12 @@ export function useChatSocket(handlers: Handlers): ChatSocket {
   useEffect(() => {
     let cancelled = false;
     let socket: Socket | null = null;
+    // True once a refresh has already been tried for the CURRENT handshake
+    // failure. Reset on a successful connect, so a later, independent auth
+    // rejection (e.g. the refresh token eventually expiring on its own 30-day
+    // clock) can try again — but a refresh whose new token the server ALSO
+    // rejects doesn't loop.
+    let refreshedForThisFailure = false;
 
     (async () => {
       const tokens = await getTokens();
@@ -64,18 +84,62 @@ export function useChatSocket(handlers: Handlers): ChatSocket {
         return;
       }
 
-      socket = io(API_BASE_URL, {
-        auth: { token: tokens.accessToken },
+      socket = io(apiClient.defaults.baseURL as string, {
+        // A function, not a static object: socket.io-client calls this fresh
+        // on the initial connect AND every reconnect/manual-reconnect
+        // attempt, so it always sends whatever token is CURRENTLY in storage
+        // — never the value captured once when the hook mounted.
+        auth: (cb) => {
+          getTokens().then((current) => cb({ token: current?.accessToken ?? null }));
+        },
         transports: ['websocket'], // RN has no XHR polling fallback worth using
       });
       socketRef.current = socket;
 
-      socket.on('connect', () => setConnectionState('connected'));
+      socket.on('connect', () => {
+        refreshedForThisFailure = false;
+        setConnectionState('connected');
+      });
       // Covers server-initiated drops, network loss, and the manager giving up.
       socket.on('disconnect', () => setConnectionState('disconnected'));
-      // A failed handshake (bad/expired token, server unreachable). The client
-      // keeps retrying by default; show "connecting" while it does.
-      socket.on('connect_error', () => setConnectionState('connecting'));
+
+      // A failed handshake. Transport-level failures (offline, server
+      // unreachable) fall through to socket.io-client's own automatic
+      // reconnection, unchanged — those should just keep retrying with
+      // whatever token is currently valid, not trigger a refresh.
+      socket.on('connect_error', (err: Error) => {
+        if (cancelled) return;
+
+        if (!isHandshakeAuthRejection(err)) {
+          setConnectionState('connecting');
+          return;
+        }
+
+        if (refreshedForThisFailure) {
+          // The refreshed token was rejected too — don't chase this further.
+          setConnectionState('disconnected');
+          socket?.disconnect();
+          void forceSignOut();
+          return;
+        }
+        refreshedForThisFailure = true;
+
+        getOrStartRefresh(apiClient.defaults.baseURL as string)
+          .then(() => {
+            if (cancelled) return;
+            // The Manager does not retry a rejected handshake on its own —
+            // ask it to try again now that storage holds a fresh token, which
+            // the `auth` function above will pick up.
+            socket?.connect();
+          })
+          .catch(() => {
+            if (cancelled) return;
+            setConnectionState('disconnected');
+            socket?.disconnect();
+            void forceSignOut();
+          });
+      });
+
       socket.io.on('reconnect_attempt', () => setConnectionState('connecting'));
 
       socket.on('message:receive', (message: Message) => handlersRef.current.onMessage(message));
