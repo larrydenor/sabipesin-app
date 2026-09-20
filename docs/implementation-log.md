@@ -1563,3 +1563,81 @@ get-or-create endpoint above), so the overlay/matches-list only ever need the
 per the user's request, handed over for a live run against the backend; wired to
 the real REST endpoints and the real Socket.IO contract and ready. The backend
 get-or-create endpoint it depends on is live-tested above (20 assertions).
+
+---
+
+## Token refresh — `POST /auth/refresh` (backend only, Chunk 1 of 3)
+
+**Why:** flagged as a pre-launch blocker — `verifyRefreshToken` (`utils/jwt.js`)
+was already correct and a refresh token was already minted and returned at OTP
+verify, but no route ever consumed one: the access token's 15-minute expiry had
+nothing to renew it, so the chat socket would drop and REST calls (e.g. profile
+save) would start 401ing partway through a session. This chunk is backend-only;
+mobile's REST interceptor and socket reconnect are later chunks.
+
+**Built:** `POST /auth/refresh` — not behind `auth` (the refresh token in the
+body is the credential; there's no access token to check by definition).
+Verifies the token with the existing `verifyRefreshToken` unchanged, then
+rotates: the old refresh token is invalidated the instant the new pair is
+minted, not just on its natural 30-day expiry. Response shape matches OTP
+verify (`accessToken`, `refreshToken`) — no mobile-side change needed to
+consume it later.
+
+**Rotation without a token blacklist or a transaction:** the codebase had no
+existing token-tracking pattern (account deletion's note confirms: "there is no
+token blacklist — access tokens are stateless JWTs"). New model
+`models/RefreshToken.js`: one row per token, written **at redemption**, keyed
+by a SHA-256 hash of the raw token (never the token itself) with a `unique`
+index — a `userId` and an `expiresAt` mirroring the token's own `exp` (TTL
+index, `expireAfterSeconds: 0`, so spent-marker rows reap themselves once the
+token they guard would've expired anyway).
+
+`refreshTokens` (`AuthController.js`) does one atomic `RefreshToken.create()`
+per request; the unique index IS the concurrency control — Mongo either
+inserts the row (first redemption, proceed to mint) or throws `E11000`
+(already redeemed — reject), so two concurrent requests for the same token can
+never both win. No transaction, same non-transactional-but-safe-on-retry
+posture as the account-deletion cascade.
+
+**Deviation from the suggested design (flagging, not asking — stays inside the
+options given):** the ask offered "jti (or the token's hash) + userId +
+issuedAt, marked as used/deleted on rotation" — i.e. write a row when the token
+is *minted*, mark it used later. Writing at mint time would mean `issueTokens`
+(called by `verifyOtp`) needs to start writing a DB row and stamping a `jti` on
+every login, which is exactly the "change to existing login/OTP-verify code"
+the brief said to flag before touching. Writing at *redemption* instead (hash
+the raw token, unique-insert on first refresh) gets the identical guarantee —
+reuse of an already-rotated token is rejected, concurrent redemption picks
+exactly one winner — with **zero changes to `AuthController.verifyOtp` or
+`utils/jwt.js`'s existing `issueTokens`/`signRefreshToken`**. Chose this
+variant specifically to keep the chunk additive-only per the brief. No changes
+were needed to login/OTP-verify code — nothing to flag beyond this note.
+
+**Failure modes** (all collapse to `401 { error, code: 'INVALID_REFRESH_TOKEN' }`
+so a client can't distinguish which case it hit): missing/non-string body field,
+signature invalid, expired, wrong `type` claim (an access token rejected the
+same as garbage), user no longer exists. A suspended/banned user's
+otherwise-valid refresh token gets `403`, matching `middlewares/auth.js`'s
+existing posture for access tokens.
+
+**Smoke test** (local mongod on port 27117, real minted tokens via the real
+`/auth/otp/request` → `/auth/otp/verify` flow, `PORT=3334`):
+- Valid refresh token → `200`, new access + refresh pair; the new access token
+  verified against `GET /profile/me` (401 would mean rejected, got `404
+  "Profile not found"` — accepted); the new refresh token verified by a second
+  successful rotation (chains correctly).
+- The OLD refresh token, reused after a successful refresh → `401
+  INVALID_REFRESH_TOKEN` (rotation actually invalidates it, not just cosmetic).
+- Expired refresh token (signed with `expiresIn: '-10s'`) → `401`.
+- Malformed/garbage string, and a well-formed *access* token passed as the
+  refresh token (`type` claim guard) → both `401`, no `500`, no stack trace in
+  the server log.
+- Missing `refreshToken` field entirely → `401`, not a crash.
+- 5 concurrent requests with the identical refresh token (`curl … &` × 5,
+  `wait`) → exactly 1 `200`, the other 4 `401 INVALID_REFRESH_TOKEN`. Confirmed
+  in the DB directly: exactly one `RefreshToken` row per token ever redeemed,
+  unique + TTL indexes both present (`db.refreshtokens.getIndexes()`).
+
+**Not built (later chunks, per the brief):** mobile's REST interceptor (401 →
+call `/auth/refresh` → retry) and the socket's reconnect-with-fresh-token path.
+Until those land, mobile behavior is unchanged from before this chunk.
