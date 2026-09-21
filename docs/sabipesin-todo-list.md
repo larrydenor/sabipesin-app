@@ -71,6 +71,7 @@ Roughly in order, per the spec's recommended sequence:
 
 ## Already resolved (kept for the record)
 
+- [x] **Token refresh (mid-session).** Backend `POST /auth/refresh` with rotation, mobile REST refresh-and-retry on 401, and chat socket handshake-rejection recovery via refresh — all three chunks merged. (PR #28)
 - [x] **Report / Block (backend)** — the App Store Guideline 1.2 safety requirement. `Report` + `Block` models, `POST /users/:id/report`, `POST`/`DELETE /users/:id/block`, `GET /users/blocked`, and blocking wired into every surface: discovery, `GET /matches` + `/matches/:id`, `GET /conversations` + `/conversations/:id/messages`, `POST /matches/:id/conversation`, and the socket `message:send` handler (either direction; Match/Conversation docs soft-excluded, never deleted). Backend only — mobile UI is a later slice. Verified against the Atlas dev DB with the real Joe/Girl accounts. (branch `feature/report-block`)
 - [x] Hardcoded MongoDB credentials rotated out, fresh SabiPesin cluster live and verified
 - [x] Fake Tindev auth (GitHub-signup, spoofable header, dead LoginController) fully stripped
