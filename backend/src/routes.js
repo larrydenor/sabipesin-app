@@ -41,6 +41,11 @@ const auth = asyncHandler(authMiddleware);
 routes.post('/auth/otp/request', asyncHandler(AuthController.requestOtp));
 routes.post('/auth/otp/verify', asyncHandler(AuthController.verifyOtp));
 
+// Refresh token rotation. Deliberately NOT behind `auth` — the caller has no
+// valid access token by definition; the refresh token in the body is the
+// credential this route checks instead.
+routes.post('/auth/refresh', asyncHandler(AuthController.refreshTokens));
+
 // NIN + selfie verification (spec §6, §4.2). Authenticated. Starts a QoreID KYC
 // session and records a pending nin_selfie Verification; returns the SDK session
 // token the client uses to run the on-device NIN lookup + selfie capture. The

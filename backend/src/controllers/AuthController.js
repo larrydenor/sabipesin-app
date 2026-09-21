@@ -3,8 +3,9 @@ const bcrypt = require('bcrypt');
 
 const User = require('../models/User');
 const Verification = require('../models/Verification');
+const RefreshToken = require('../models/RefreshToken');
 const termii = require('../services/termii');
-const { issueTokens } = require('../utils/jwt');
+const { issueTokens, verifyRefreshToken } = require('../utils/jwt');
 
 const PROVIDER = 'termii';
 
@@ -230,9 +231,70 @@ async function verifyOtp(req, res) {
     });
 }
 
+// SHA-256 hex digest of a refresh token, used only as a lookup key in
+// RefreshToken — we never store the raw bearer credential.
+function hashRefreshToken(token) {
+    return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// POST /auth/refresh  { refreshToken }  -> { accessToken, refreshToken }
+// Rotates a refresh token: verify it, atomically claim it as spent (a unique
+// index on RefreshToken.tokenHash is the whole mechanism — see that model),
+// then mint a fresh access+refresh pair. NOT behind the `auth` middleware: the
+// caller has no valid access token by definition, the refresh token itself is
+// the credential. Every failure mode (missing/malformed/expired/wrong-type/
+// already-used token, or a user that's gone/suspended) collapses to the same
+// 401 INVALID_REFRESH_TOKEN so a client can't distinguish which case it hit.
+async function refreshTokens(req, res) {
+    const token = req.body.refreshToken;
+
+    if (!token || typeof token !== 'string') {
+        return res.status(401).json({ error: 'A refresh token is required', code: 'INVALID_REFRESH_TOKEN' });
+    }
+
+    let decoded;
+    try {
+        decoded = verifyRefreshToken(token);
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired refresh token', code: 'INVALID_REFRESH_TOKEN' });
+    }
+
+    const user = await User.findById(decoded.sub);
+    if (!user) {
+        return res.status(401).json({ error: 'Invalid or expired refresh token', code: 'INVALID_REFRESH_TOKEN' });
+    }
+    if (user.status !== 'active') {
+        return res.status(403).json({ error: `Account is ${user.status}` });
+    }
+
+    // Claim this token before minting anything. If another request already
+    // claimed it (a genuine replay, or the loser of a concurrent race on the
+    // same token) this insert hits the unique index and throws E11000.
+    try {
+        await RefreshToken.create({
+            tokenHash: hashRefreshToken(token),
+            userId: user._id,
+            expiresAt: new Date(decoded.exp * 1000),
+        });
+    } catch (err) {
+        if (err.code === 11000) {
+            return res.status(401).json({
+                error: 'This refresh token has already been used',
+                code: 'INVALID_REFRESH_TOKEN',
+            });
+        }
+        throw err;
+    }
+
+    const { accessToken, refreshToken } = issueTokens(user);
+
+    return res.json({ accessToken, refreshToken });
+}
+
 module.exports = {
     requestOtp,
     verifyOtp,
+    refreshTokens,
     normalizePhone,
     generateCode,
 };

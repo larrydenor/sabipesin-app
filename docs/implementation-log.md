@@ -6,6 +6,332 @@ feature, committed together with that feature's code.
 
 ---
 
+## Token refresh — chat socket reconnect (Chunk 3 of 3 — feature complete)
+
+**Why:** Chunk 2 fixed REST; the socket was still open. Investigation flagged
+`chatSocket.ts`'s handshake `auth: { token: accessToken }` as a static object
+captured once at mount — Socket.IO reuses it verbatim on every reconnect, so
+once the access token expires, reconnection would be attempted with a
+permanently stale token.
+
+**Verified against a real backend before writing any fix** (not assumed from
+the investigation's phrasing): a rejected handshake does **not** actually loop
+forever. socket.io-client's Manager auto-retries a *transport-level* failure
+(offline, wrong host — surfaces as a `TransportError` with
+`.type === 'TransportError'`) but, by design, does **not** retry a
+*middleware-rejected* handshake at all (`io.use`'s `next(new Error(...))` —
+`src/socket/index.js` — surfaces as a plain `Error`, no `.type`). One
+`connect_error` fires and the socket just goes silently dead — arguably worse
+than a loop, since there's no ongoing sign anything is still trying. This
+corrects the "silent reconnect loop" framing from the investigation summary;
+the actual bug is "one rejected attempt, then nothing," not an infinite retry.
+Also confirmed separately: a *server-initiated* `socket.disconnect()` sends
+reason `"io server disconnect"`, which socket.io-client explicitly does not
+auto-reconnect from either — different from a real network drop, which closes
+the transport with reason `"transport close"` and DOES auto-reconnect. Both
+findings shaped the smoke test below.
+
+**Fix 1 — a live token on every attempt:** `auth` is now a function
+(`(cb) => { getTokens().then(current => cb({ token: current?.accessToken ??
+null })) }`), not a static object. socket.io-client invokes this fresh on the
+initial connect AND every reconnect/manual-reconnect attempt (verified:
+`Socket.prototype.onopen` checks `typeof this.auth == "function"` and calls it
+per attempt), so whatever token is currently in storage is always what gets
+sent.
+
+**Fix 2 — handle a rejected handshake instead of leaving it dead:** on
+`connect_error`, `isHandshakeAuthRejection(err)` distinguishes the two cases
+above (`err.type !== 'TransportError'`). A transport error falls through to
+Socket.IO's own automatic reconnection, unchanged — network drops should just
+keep retrying with whatever token is currently valid. A middleware rejection:
+- First occurrence for this failure → `getOrStartRefresh(baseUrl)`, then
+  `socket.connect()` manually once the refresh resolves (the Manager won't
+  retry this on its own — confirmed above), so the retried handshake goes out
+  with the fresh token via Fix 1.
+- Refresh fails, or the refreshed token is *also* rejected
+  (`refreshedForThisFailure` guard, mirrors Chunk 2's `_retried`) →
+  `socket.disconnect()`, `connectionState` set to `'disconnected'` explicitly
+  (confirmed a `.disconnect()` on a socket that never successfully connected
+  does NOT fire a `'disconnect'` event, so the UI state can't be left to that
+  listener here), and `forceSignOut()`.
+- `refreshedForThisFailure` resets on a successful `'connect'`, so a later,
+  independent auth rejection (e.g. the refresh token's own 30-day expiry) can
+  trigger the flow again — but a refresh whose new token the server also
+  rejects doesn't loop.
+
+**Shared refresh/sign-out logic, extracted rather than duplicated:**
+`getOrStartRefresh` and `forceSignOut` (plus `registerSignOutHandler`) moved
+out of `client.ts` into a new `auth/refreshSession.ts`, used by both
+`client.ts` and `chatSocket.ts`. Flagging this judgment call rather than just
+making it silently: extracting means a REST 401 and a socket handshake
+rejection landing around the same moment share ONE refresh call (the
+module-level `refreshPromise` is now genuinely global, not per-transport)
+instead of racing two against the backend's rotation (Chunk 1 invalidates a
+refresh token the instant it's redeemed, so a losing racer would get
+`INVALID_REFRESH_TOKEN`). `getOrStartRefresh(baseUrl)` takes the base URL as a
+parameter rather than importing it, so each transport still resolves its own —
+both use `apiClient.defaults.baseURL` in practice. `chatSocket.ts` now connects
+via `io(apiClient.defaults.baseURL, ...)` instead of the separately-imported
+`API_BASE_URL`, the same "one source of truth" fix Chunk 2 made for the REST
+refresh call, for the same testability reason.
+
+**Test infrastructure:** added `socket.io` (server) and
+`@types/react-test-renderer` as devDependencies — `react-test-renderer` itself
+was already present transitively. `useChatSocket` is a hook, so the test uses a
+minimal hand-rolled `renderHook` (a host component + `react-test-renderer`'s
+`act`/`create`) rather than pulling in `@testing-library/react-hooks`, which
+isn't maintained for React 18.
+
+**Two real bugs caught by writing the smoke test, both fixed before it
+passed:**
+1. The test process hung indefinitely after all assertions had actually
+   completed. Cause: `renderChatSocket()` never unmounted the test renderer, so
+   the hook's socket (and any pending reconnection timers) outlived each test
+   and kept Node's event loop alive. Fixed with an `afterEach` that unmounts
+   every renderer created. Test-file-only issue, not a `chatSocket.ts` bug — a
+   real screen unmounting already calls the hook's cleanup, which disconnects
+   and removes listeners.
+2. The "network drop" and "token expires mid-session" tests originally used
+   `serverSocket.disconnect(true)` to simulate a drop — which, per the finding
+   above, sends `"io server disconnect"` and never triggers a reconnect, so
+   both tests timed out waiting for a reconnection that was never going to
+   happen. Fixed by using `serverSocket.conn.close()` instead (closes the
+   underlying engine.io transport, reason `"transport close"`), which does
+   trigger the client's normal automatic reconnection — confirmed directly
+   against a real `socket.io-client`/`socket.io` pair before changing the
+   tests.
+
+**Smoke test** (`src/realtime/__tests__/chatSocket.test.ts`, a real `socket.io`
+server + real `socket.io-client`, `expo-secure-store` swapped for an in-memory
+Map):
+- Expired access token at initial connect → handshake rejected → refresh
+  triggered → `socket.connect()` retried → connects with the fresh token.
+  Exactly one refresh call; new pair persisted to storage.
+- Token that "expires mid-session": connects fine, then the underlying
+  transport is closed (simulating a drop) at the moment the server would also
+  now reject the old token → the client's own auto-reconnect attempt gets
+  rejected → refresh → manual reconnect → connects with the fresh token.
+  Exactly one refresh call, not a loop.
+- Refresh itself fails (backend's `INVALID_REFRESH_TOKEN`) → `forceSignOut`
+  called exactly once, socket ends in `'disconnected'`, tokens cleared,
+  exactly one refresh attempt (no retry chase).
+- An ordinary network drop with a still-valid token (`conn.close()`,
+  `authCheck` never changes) → reconnects on its own, `refreshCallCount` stays
+  `0` — confirms refresh is never triggered for a plain transport blip.
+- Regression: `sendMessage` still round-trips through the real socket once
+  connected — the message-send code path is unchanged by this chunk, this just
+  confirms the new connection setup around it didn't break it.
+
+All 5 pass; the full mobile suite (both this chunk's and Chunk 2's test files)
+is 10/10, and the process now exits cleanly (no more open-handle hang).
+`tsc --noEmit` clean across the whole project.
+
+**Live verification:** Backend + local mongod run locally (per the brief, no
+Atlas needed — mobile/socket-only). Confirmed via `curl` that a directly-seeded
+Match + Conversation resolve correctly through the real `GET /matches` and
+`POST /matches/:id/conversation` routes (used as fixtures for a two-account
+chat regression). Loaded the real compiled app (Metro/Expo, iOS Simulator)
+against this backend: it correctly detected a stale/invalid stored session and
+cleanly fell back to the sign-in screen — live confirmation the Chunk 2 REST
+interceptor + sign-out path still works end-to-end in the actual app, not just
+under Jest. **Could not complete a full manual two-account UI chat exchange in
+the simulator** — this sandbox has no UI automation tool available (no
+idb/Appium/chromium-cli) and blocks both Accessibility control (`System
+Events` error -25204) and screen capture (`screencapture` permission denied)
+for driving/verifying taps by coordinate; `cliclick` clicks landed but produced
+no visible effect, most likely for the same underlying permission reason.
+Flagging this rather than skipping it silently: the send/receive code path
+itself is covered by the Jest regression test above against a real wire
+protocol with unchanged code, but a true device-UI, two-account, end-to-end
+chat exchange was not run for this chunk.
+
+**Feature complete across all 3 chunks:** `POST /auth/refresh` with rotation
+(backend) → REST 401 refresh-and-retry (mobile) → socket handshake-rejection
+refresh-and-reconnect (mobile). An access token expiring mid-session no longer
+401s REST calls or silently kills the chat socket, in either direction.
+
+---
+
+## Token refresh — mobile REST interceptor (Chunk 2 of 3)
+
+**Why:** Chunk 1 built `POST /auth/refresh`, but nothing on mobile called it.
+`ApiError.kind` also had no `'unauthorized'` case — `kindForStatus` bucketed
+every non-429 4xx (including a real 401) as `'validation'`, so an expired
+access token on, say, profile save would have been silently routed into
+`parseFieldErrors` as if it were a field error. This chunk fixes both, REST
+only — the Socket.IO reconnect path (`chatSocket.ts`) is untouched, per the
+brief; it's Chunk 3.
+
+**`errors.ts`:** added `'unauthorized'` to `ApiErrorKind`; `kindForStatus`
+returns it for 401 (checked ahead of the `>= 400` catch-all that used to claim
+it). Audited every reader of `.kind` before changing this (asked for, not
+assumed): `ProfileSetupScreen.tsx` and `profile.ts`'s `parseFieldErrors` both
+already fell back to `{ _form: err.message }` for any non-`'validation'` kind,
+so reclassifying 401 produces byte-identical rendered output at both sites.
+`OtpEntryScreen.tsx` only checks `'rate_limited'`, unaffected. Nothing needed
+flagging — no screen-level behavior changed beyond the interceptor itself.
+
+**`client.ts` — refresh-and-retry:** the response interceptor now branches on
+a genuine 401 only (nothing else). On the first 401 for a given request: calls
+`POST /auth/refresh` with the stored refresh token, saves the returned pair via
+the existing `saveTokens`, and retries the original request once (a `_retried`
+marker stashed on the axios config prevents a second attempt if the retry
+itself 401s — that case goes straight to sign-out, no second refresh). On any
+refresh failure — the backend's 401 `INVALID_REFRESH_TOKEN`, or no refresh
+token in storage at all — clears tokens and calls the sign-out handler
+registered by `AuthContext`, reusing its existing `signOut()` (which already
+clears tokens and flips `isAuthenticated`, and per its own header comment is
+what swaps the navigator to the auth stack — no new sign-out mechanism
+invented). Concurrent 401s (e.g. a screen firing several calls at once) share
+ONE in-flight refresh via a module-level `refreshPromise` — every 401 that
+lands while a refresh is pending awaits that same promise and retries with
+whatever it produces, instead of racing separate refresh calls against the
+backend's rotation (Chunk 1) and losing.
+
+The refresh call itself is a bare `axios.post` (not `apiClient`) so it can
+never recurse through this same interceptor. Refactored it to read the base
+URL off `apiClient.defaults.baseURL` rather than the separately-imported
+`API_BASE_URL` constant — one source of truth, and it's what let the smoke
+test below point the whole client at a local test server without touching
+`config/env.ts`.
+
+**`AuthContext.tsx`:** added `registerSignOutHandler(value.signOut)` in a
+`useEffect` (unregistered on unmount). `client.ts` can't import `signOut`
+directly — it only exists as state inside the provider, not a top-level
+export — so the provider hands the interceptor a reference to call instead.
+(Chunk 3 later moved `registerSignOutHandler` from `client.ts` into a shared
+`auth/refreshSession.ts` — `AuthContext.tsx` now imports it from there.)
+
+**Test infrastructure (none existed):** the mobile project had no test runner
+at all (`tsc --noEmit` was the only script). Added `jest` + `jest-expo` +
+`@types/jest` as devDependencies and a `test` script, since simulating "401 →
+refresh → retry" and the concurrency/dedupe case needs to exercise real
+in-flight requests, not just type-checking. `jest.config.js` overrides
+`testEnvironment` to plain `'node'` (from jest-expo's default RN-emulating
+environment): that environment hardcodes the `react-native` package export
+condition, which resolves `axios` to its XHR-based browser bundle — under Jest
+that adapter never does real network I/O, so every request came back a generic
+"network" error regardless of what the test server did. Plain `node` gives
+axios its real `http`-based adapter. This only affects how test files resolve
+modules — the app's own Metro/Expo build is untouched.
+
+**Deviation found and fixed while building the test, not before:** originally
+tried to point the test server at the client via
+`process.env.EXPO_PUBLIC_API_BASE_URL`, set at runtime in `beforeAll` before
+requiring `client.ts`. That doesn't work — confirmed by isolating it to a
+throwaway module — because `babel-preset-expo` statically inlines
+`EXPO_PUBLIC_*` vars at transform time, so a runtime `process.env` write has
+no effect on the already-compiled `config/env.ts`. Switched to overriding
+`apiClient.defaults.baseURL` directly after import, which is what motivated
+the `performRefresh` refactor above (it has to follow the same override).
+
+**Smoke test** (`src/api/__tests__/client.test.ts`, real `apiClient` against a
+real local `http.createServer`, `expo-secure-store` swapped for an in-memory
+Map since there's no device under Jest — nothing else mocked):
+- 401 → refresh succeeds → original request retried with the new token →
+  caller sees only the eventual 200. New token pair confirmed persisted via
+  `tokenStorage.getTokens()`.
+- 401 → refresh call itself 401s (`INVALID_REFRESH_TOKEN`) → registered
+  sign-out handler called exactly once, tokens cleared, exactly one attempt at
+  the original request (no retry attempted).
+- 3 concurrent requests all 401 at once → exactly one `/auth/refresh` call
+  (asserted via a server-side counter) → all 3 retry successfully with the
+  resulting token.
+- A retry that itself comes back 401 → exactly one refresh call total (not
+  two), sign-out triggered, no loop.
+- A real 400 validation error → `kind: 'validation'`, no refresh attempted,
+  `parseFieldErrors` output unchanged (`{ dob: 'Cast to Date failed for value
+  "x" at path \`dob\`' }`) — confirms the existing field-error path is
+  byte-for-byte unaffected by this chunk.
+
+All 5 pass (`npx jest`, `--no-cache` re-run to rule out stale-cache effects).
+`tsc --noEmit` clean (strict) across the whole project, unchanged.
+
+**Not built at this point (Chunk 3):** `chatSocket.ts`'s reconnect-with-fresh-
+token path. See the Chunk 3 entry above for what was actually found there —
+the socket didn't loop, it went silently dead; either way, only REST calls
+could self-heal until Chunk 3 landed.
+
+---
+
+## Token refresh — `POST /auth/refresh` (backend only, Chunk 1 of 3)
+
+**Why:** flagged as a pre-launch blocker — `verifyRefreshToken` (`utils/jwt.js`)
+was already correct and a refresh token was already minted and returned at OTP
+verify, but no route ever consumed one: the access token's 15-minute expiry had
+nothing to renew it, so the chat socket would drop and REST calls (e.g. profile
+save) would start 401ing partway through a session. This chunk is backend-only;
+mobile's REST interceptor and socket reconnect are later chunks.
+
+**Built:** `POST /auth/refresh` — not behind `auth` (the refresh token in the
+body is the credential; there's no access token to check by definition).
+Verifies the token with the existing `verifyRefreshToken` unchanged, then
+rotates: the old refresh token is invalidated the instant the new pair is
+minted, not just on its natural 30-day expiry. Response shape matches OTP
+verify (`accessToken`, `refreshToken`) — no mobile-side change needed to
+consume it later.
+
+**Rotation without a token blacklist or a transaction:** the codebase had no
+existing token-tracking pattern (account deletion's note confirms: "there is no
+token blacklist — access tokens are stateless JWTs"). New model
+`models/RefreshToken.js`: one row per token, written **at redemption**, keyed
+by a SHA-256 hash of the raw token (never the token itself) with a `unique`
+index — a `userId` and an `expiresAt` mirroring the token's own `exp` (TTL
+index, `expireAfterSeconds: 0`, so spent-marker rows reap themselves once the
+token they guard would've expired anyway).
+
+`refreshTokens` (`AuthController.js`) does one atomic `RefreshToken.create()`
+per request; the unique index IS the concurrency control — Mongo either
+inserts the row (first redemption, proceed to mint) or throws `E11000`
+(already redeemed — reject), so two concurrent requests for the same token can
+never both win. No transaction, same non-transactional-but-safe-on-retry
+posture as the account-deletion cascade.
+
+**Deviation from the suggested design (flagging, not asking — stays inside the
+options given):** the ask offered "jti (or the token's hash) + userId +
+issuedAt, marked as used/deleted on rotation" — i.e. write a row when the token
+is *minted*, mark it used later. Writing at mint time would mean `issueTokens`
+(called by `verifyOtp`) needs to start writing a DB row and stamping a `jti` on
+every login, which is exactly the "change to existing login/OTP-verify code"
+the brief said to flag before touching. Writing at *redemption* instead (hash
+the raw token, unique-insert on first refresh) gets the identical guarantee —
+reuse of an already-rotated token is rejected, concurrent redemption picks
+exactly one winner — with **zero changes to `AuthController.verifyOtp` or
+`utils/jwt.js`'s existing `issueTokens`/`signRefreshToken`**. Chose this
+variant specifically to keep the chunk additive-only per the brief. No changes
+were needed to login/OTP-verify code — nothing to flag beyond this note.
+
+**Failure modes** (all collapse to `401 { error, code: 'INVALID_REFRESH_TOKEN' }`
+so a client can't distinguish which case it hit): missing/non-string body field,
+signature invalid, expired, wrong `type` claim (an access token rejected the
+same as garbage), user no longer exists. A suspended/banned user's
+otherwise-valid refresh token gets `403`, matching `middlewares/auth.js`'s
+existing posture for access tokens.
+
+**Smoke test** (local mongod on port 27117, real minted tokens via the real
+`/auth/otp/request` → `/auth/otp/verify` flow, `PORT=3334`):
+- Valid refresh token → `200`, new access + refresh pair; the new access token
+  verified against `GET /profile/me` (401 would mean rejected, got `404
+  "Profile not found"` — accepted); the new refresh token verified by a second
+  successful rotation (chains correctly).
+- The OLD refresh token, reused after a successful refresh → `401
+  INVALID_REFRESH_TOKEN` (rotation actually invalidates it, not just cosmetic).
+- Expired refresh token (signed with `expiresIn: '-10s'`) → `401`.
+- Malformed/garbage string, and a well-formed *access* token passed as the
+  refresh token (`type` claim guard) → both `401`, no `500`, no stack trace in
+  the server log.
+- Missing `refreshToken` field entirely → `401`, not a crash.
+- 5 concurrent requests with the identical refresh token (`curl … &` × 5,
+  `wait`) → exactly 1 `200`, the other 4 `401 INVALID_REFRESH_TOKEN`. Confirmed
+  in the DB directly: exactly one `RefreshToken` row per token ever redeemed,
+  unique + TTL indexes both present (`db.refreshtokens.getIndexes()`).
+
+**Not built (later chunks, per the brief):** mobile's REST interceptor (401 →
+call `/auth/refresh` → retry) and the socket's reconnect-with-fresh-token path.
+Until those land, mobile behavior is unchanged from before this chunk.
+
+---
+
 ## Backend — Account Deletion, Chunk 2: DELETE /account (destructive)
 
 **Built:** `DELETE /account` (App Store Guideline 5.1.1(v)), in
