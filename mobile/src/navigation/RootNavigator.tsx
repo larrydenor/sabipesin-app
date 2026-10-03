@@ -17,6 +17,7 @@ import { DiscoveryScreen } from '../screens/DiscoveryScreen';
 import { DiscoverySettingsScreen } from '../screens/DiscoverySettingsScreen';
 import { MatchesScreen } from '../screens/MatchesScreen';
 import { ChatScreen } from '../screens/ChatScreen';
+import { SubscriptionScreen } from '../screens/SubscriptionScreen';
 
 const AuthStack = createNativeStackNavigator<AuthStackParamList>();
 const AppStack = createNativeStackNavigator<AppStackParamList>();
@@ -152,9 +153,18 @@ function AppFlow() {
               <Text style={styles.headerAction}>Matches</Text>
             </Pressable>
           ),
-          // Filter icon (left of Sign out) opens the discovery-settings form.
+          // Unlimited icon, then filter icon (left of Sign out) opens discovery
+          // settings.
           headerRight: () => (
             <View style={styles.headerRightRow}>
+              <Pressable
+                onPress={() => navigation.navigate('Subscription')}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Unlimited subscription"
+              >
+                <Text style={styles.headerIcon}>⭐</Text>
+              </Pressable>
               <Pressable
                 onPress={() => navigation.navigate('DiscoverySettings')}
                 hitSlop={8}
@@ -186,6 +196,11 @@ function AppFlow() {
         // Title is set from the passed-in name for an instant header, then
         // refreshed by the screen once the conversation resolves.
         options={({ route }) => ({ title: route.params.otherUserName || 'Chat' })}
+      />
+      <AppStack.Screen
+        name="Subscription"
+        component={SubscriptionScreen}
+        options={{ title: 'Unlimited' }}
       />
     </AppStack.Navigator>
   );

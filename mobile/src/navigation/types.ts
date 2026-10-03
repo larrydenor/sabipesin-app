@@ -23,4 +23,7 @@ export type AppStackParamList = {
   // on open. The optional name/photo let the header render instantly before that
   // round-trip resolves; the screen still refreshes them from the response.
   Chat: { matchId: string; otherUserName?: string; otherUserPhotoUrl?: string | null };
+  // Subscription status + Paystack upgrade (Android/web only — iOS shows a
+  // coming-soon state), reached from the Discover header.
+  Subscription: undefined;
 };
