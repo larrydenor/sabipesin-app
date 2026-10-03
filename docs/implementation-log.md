@@ -6,6 +6,118 @@ feature, committed together with that feature's code.
 
 ---
 
+## Mobile subscription screen — Paystack upgrade + status (Phase 6, mobile)
+
+**Built:** The mobile side of the Unlimited plan: a status read, a Paystack
+checkout launch (Android/web path only — spec §6), and the poll-for-activation
+loop that closes the loop after the user returns from the hosted checkout.
+Backend counterpart (`GET /subscriptions/me`, `POST /subscriptions/subscribe/
+paystack`, the signature-verified webhook) already existed from the prior
+Phase 6 slices above — this is purely the client.
+
+**New files:**
+- `src/api/subscriptions.ts` — typed wrappers: `getSubscriptionStatus()` (`GET
+  /subscriptions/me`) and `subscribeToUnlimited()` (`POST /subscriptions/
+  subscribe/paystack`), following the `profile.ts`/`discovery.ts` convention of
+  a thin typed layer over the shared `apiClient`.
+- `src/screens/SubscriptionScreen.tsx` — on mount, reads status via
+  `getSubscriptionStatus()`. Free/non-active user on Android sees an "Upgrade to
+  Unlimited" button; tapping it calls `subscribeToUnlimited()`, then
+  `WebBrowser.openAuthSessionAsync(authorizationUrl)`. Browser close (for any
+  reason — `openAuthSessionAsync` can't distinguish pay/cancel/dismiss) starts a
+  poll of `getSubscriptionStatus()` every 2s, up to 15 attempts (~30s). A flip to
+  `plan: 'unlimited', status: 'active'` shows a success notice; exhausting the
+  budget without one shows a neutral "still processing" notice — deliberately
+  not an error state, since the webhook may simply be slow and we have no signal
+  either way. A transient error mid-poll is swallowed (keeps polling on
+  schedule) rather than surfacing a scary failure for one blip. iOS renders a
+  disabled "coming soon" notice instead of the button and never calls
+  `subscribeToUnlimited()` or opens a browser session. A 409 from `subscribe`
+  (already active) is treated as a no-op refresh, not an error banner.
+
+**Navigation** (`src/navigation/types.ts`, `RootNavigator.tsx`):
+- New `AppStack` route `Subscription` (undefined).
+- `Home` (Discover) header gains a **⭐ Unlimited** icon to the left of the
+  existing filter icon, mirroring the `DiscoverySettings` header-icon pattern
+  (`navigation.navigate('Subscription')`).
+
+**Dependencies:** added `expo-web-browser` (`~13.0.3`, via `npx expo install`
+for SDK 51 compatibility) — not previously a dependency.
+
+**Deviations from spec:**
+- No explicit success/failure signal from the browser close itself; correctness
+  rests entirely on the poll eventually observing the webhook's write (or timing
+  out honestly). This mirrors the chat slice's "honest about what we don't know"
+  stance above rather than guessing from `WebBrowserAuthSessionResult`.
+
+**Known gaps (not specific to this slice, but surfaced while testing it):**
+- **No request logging.** `server.js` has no morgan/winston/pino or any other
+  access-log middleware — nothing logs a request's path/method/body for any
+  route, including this one. "Check the log for a call to X" is not a valid
+  verification technique here; it would read as empty whether or not the call
+  happened. Verifying whether an endpoint fired requires an independent signal
+  (here, the Paystack sandbox API's own transaction records).
+- **Synthesized placeholder email.** `SubscriptionController.subscribeWithPaystack`
+  sends Paystack `${phone}@users.sabipesin.com` (accounts are phone-only, but
+  Paystack requires an email). Paystack mails the payment receipt to that
+  address, so real payers currently receive no receipt — already flagged as a
+  launch blocker in that controller; repeated here because this slice is what
+  actually drives a receipt-bearing sandbox charge end to end.
+
+**Verification:** Mobile `tsc --noEmit` clean (strict).
+
+Live-tested end-to-end on the **iOS Simulator** against a local-mongod-only
+backend (`mongodb://127.0.0.1:27017/sabipesin_subtest`, never Atlas) and the
+real Paystack sandbox (`sk_test_`/`pk_test_`). iOS has no purchase path by
+design (spec — Apple requires StoreKit for digital subscriptions), so reaching
+the button required a **temporary, since fully-reverted** `TEMP_ALLOW_IOS_TESTING`
+const in `SubscriptionScreen.tsx` that bypassed the `Platform.OS === 'android'`
+checks for this test session only. The revert was verified three ways: a diff
+against a saved pre-revert snapshot showing exactly the override's 3 hunks
+removed and nothing else, `grep -n "TEMP_ALLOW_IOS_TESTING"` returning zero
+matches, and a clean `tsc --noEmit` after. **The committed code was never
+changed to allow iOS** — `onUpgrade` still returns early unless
+`Platform.OS === 'android'`, and the iOS branch still renders only the
+coming-soon notice.
+
+Two local-only seeded accounts (free; and an already-active Unlimited) covered
+all five original smoke-test cases:
+- Free account: "Free" status + Upgrade button shown.
+- Tap Upgrade → real Paystack sandbox checkout opened; completed by choosing
+  the "Success" option in Paystack's sandbox test-mode picker (no card details
+  were entered). **No ngrok/tunnel is configured**, so Paystack's
+  servers cannot reach this localhost backend — real Paystack-to-webhook
+  delivery was already proven live in the Phase 6 webhook entry below and was
+  not re-proven here. Instead, a manually HMAC-signed `charge.success` POST
+  (same technique as that Phase 6 test) was sent to the local webhook route
+  using the *real* sandbox transaction reference looked up from Paystack's own
+  API. The Mongo `Subscription` doc was confirmed flipped to `unlimited/active`
+  before the checkout sheet was closed; the screen's poll then picked it up and
+  showed the success state ("Renews 02/11/2026").
+- Dismiss-without-paying: the account's `Subscription` doc was reset to free
+  (deleted from the local test DB) to retest; the corresponding Paystack
+  transaction was confirmed `abandoned` via the sandbox API; the screen showed
+  neither a false success nor an error, consistent with the neutral
+  still-processing/no-upgrade-button behavior.
+- Already-active account: "Unlimited" + renewal date shown, no Upgrade button.
+- iOS (after reverting the temporary override): "Free" status + the
+  coming-soon notice, no Upgrade button — confirmed visually on the simulator.
+
+Backend chain additionally covered by a reconstructed version of the Phase 6
+webhook harness against the same local-mongod backend (7/7 assertions: new
+user defaults to free, real sandbox `authorizationUrl` returned, correctly
+signed webhook → `200` → flips to `unlimited/active`, badly signed webhook →
+`401`, second subscribe attempt on an active plan → `409`); harness deleted
+immediately after running, nothing from it committed.
+
+**Not verified: Android.** No Android emulator or device was used in this
+slice — `WebBrowser.openAuthSessionAsync`'s in-app-browser behavior on Android
+specifically (the platform this feature actually ships on) remains untested.
+Only iOS (under the temporary, reverted override) and the backend chain were
+exercised live.
+
+---
+
 ## Token refresh — chat socket reconnect (Chunk 3 of 3 — feature complete)
 
 **Why:** Chunk 2 fixed REST; the socket was still open. Investigation flagged
@@ -1889,3 +2001,4 @@ get-or-create endpoint above), so the overlay/matches-list only ever need the
 per the user's request, handed over for a live run against the backend; wired to
 the real REST endpoints and the real Socket.IO contract and ready. The backend
 get-or-create endpoint it depends on is live-tested above (20 assertions).
+
