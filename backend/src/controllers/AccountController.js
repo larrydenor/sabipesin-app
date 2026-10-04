@@ -97,4 +97,64 @@ async function deleteAccount(req, res) {
     });
 }
 
-module.exports = { deleteAccount };
+// Mirrors the schema validators on User.js (email) so a bad request gets a
+// clear 400 + error code before touching the DB, in the same explicit style
+// as ProfileController.updateDiscoverySettings.
+const EMAIL_RE = /^\S+@\S+\.\S+$/;
+const EMAIL_MAX_LENGTH = 254;
+
+// GET /account/email
+// Self-only (target is always req.userId, via the auth middleware's own
+// User.findById — there is no other-account lookup path). Never verified,
+// never used for login/OTP/recovery.
+async function getEmail(req, res) {
+    return res.json({ email: req.user.email ?? null });
+}
+
+// PUT /account/email
+// Accepts { email: string | null }. Trims and lowercases; an empty string or
+// null clears it back to null — this field is always optional and must never
+// block any other action (receipt delivery only). Self-only, same as getEmail.
+//
+// Deliberately calls req.user.save() rather than an update query: this
+// codebase is on Mongoose 5.7, where update queries (updateOne/
+// findOneAndUpdate/etc.) do NOT run schema validators unless explicitly
+// passed `runValidators: true`. save() always runs them, so the schema's own
+// match/maxlength validators on User.js are a real backstop here, not just
+// the explicit checks below — a bad value is rejected twice, not once.
+async function updateEmail(req, res) {
+    const { email } = req.body;
+
+    if (email !== null && typeof email !== 'string') {
+        return res.status(400).json({ error: 'email must be a string or null', code: 'INVALID_EMAIL' });
+    }
+
+    const trimmed = (email ?? '').trim().toLowerCase();
+
+    if (trimmed === '') {
+        req.user.email = null;
+        await req.user.save();
+        return res.json({ email: null });
+    }
+
+    if (trimmed.length > EMAIL_MAX_LENGTH) {
+        return res.status(400).json({
+            error: `email must be at most ${EMAIL_MAX_LENGTH} characters`,
+            code: 'EMAIL_TOO_LONG',
+        });
+    }
+
+    if (!EMAIL_RE.test(trimmed)) {
+        return res.status(400).json({ error: 'email is not a valid address', code: 'INVALID_EMAIL' });
+    }
+
+    // Mongoose ValidationError (shouldn't fire given the checks above, but is
+    // the real proof the schema validators are wired up) propagates to the
+    // central error handler, mapped to 400.
+    req.user.email = trimmed;
+    await req.user.save();
+
+    return res.json({ email: req.user.email });
+}
+
+module.exports = { deleteAccount, getEmail, updateEmail };

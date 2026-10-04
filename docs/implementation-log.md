@@ -6,6 +6,95 @@ feature, committed together with that feature's code.
 
 ---
 
+## Receipt email — account-level email field + `GET/PUT /account/email` (backend only, Chunk 1 of 4)
+
+**Why:** `SubscriptionController.subscribeWithPaystack` and `PurchasesController
+.startPaystackPurchase` synthesize `${phone}@users.sabipesin.com` for Paystack
+because accounts are phone-only — so real payers never receive their Paystack
+receipt (tracked as a launch blocker, with the seam already noted in both
+controllers: `profile?.email || synthesized`). This chunk adds the optional
+email itself and the endpoints to manage it. It deliberately does **not**
+touch `SubscriptionController`, `PurchasesController`, or any payment code —
+wiring the real address into the Paystack `email` field is Chunk 2.
+
+**Built:**
+- `models/User.js` — new `email` field: `{ type: String, default: null,
+  lowercase: true, trim: true, maxlength: 254, match: /^\S+@\S+\.\S+$/ }`. No
+  unique index — this is a receipt-delivery convenience field, not an identity
+  key, so two accounts may share an address. Never verified, never used for
+  login/OTP/recovery; auth stays phone-only and untouched.
+- `AccountController.getEmail` — `GET /account/email` → `{ email: string |
+  null }`, read from `req.user` (already loaded by `middlewares/auth.js`'s
+  `User.findById`, no projection excludes it — confirmed below).
+- `AccountController.updateEmail` — `PUT /account/email` accepts `{ email:
+  string | null }`. Trims and lowercases; empty string or `null` clears it back
+  to `null`. Explicit pre-checks (same style as `updateDiscoverySettings`)
+  return `400` with a `code` before touching the DB: `INVALID_EMAIL` (not a
+  string, or fails the match regex) and `EMAIL_TOO_LONG` (> 254 chars after
+  trim). Self-only — the target is always `req.userId`, via the same
+  `req.user` the auth middleware already loaded (no other-account lookup path
+  exists), mirroring `deleteAccount`.
+- Both routes registered in `routes.js` next to `DELETE /account`, behind `auth`.
+
+**Mongoose 5.7 validator gotcha — deliberately avoided `findOneAndUpdate`:**
+this codebase's Mongoose version does not run schema validators on update
+queries unless `runValidators: true` is explicitly passed. `updateEmail` calls
+`req.user.save()` instead (save() always runs validators), so the schema's own
+`match`/`maxlength` validators are a real second line of defense behind the
+controller's explicit checks — proved directly below, not assumed.
+
+**Smoke test** (local mongod, scratch dbpath on port 27099, `PORT=3399`,
+disposable accounts minted directly via `utils/jwt.issueTokens` — no OTP, no
+Atlas):
+- `GET /account/email` on a fresh account → `200 { email: null }`.
+- `PUT { email: "user@example.com" }` → `200`; subsequent `GET` reflects it.
+- `PUT { email: "  Test@Example.COM " }` → stored/returned as
+  `test@example.com` (trimmed + lowercased).
+- `PUT { email: "not-an-email" }` → `400 { error, code: "INVALID_EMAIL" }`.
+- `PUT` with a 296-char value → `400 { error, code: "EMAIL_TOO_LONG" }`.
+- `PUT { email: "" }` and `PUT { email: null }` both → `200 { email: null }`.
+- No `Authorization` header → `401`.
+- Two different accounts both `PUT` the same address → both `200` (no
+  uniqueness conflict).
+- Set an email, then `DELETE /account` → confirmed via a direct `User.findOne`
+  against the scratch DB that no User document remains (not just that the
+  field was cleared).
+- Schema-validator proof, bypassing the controller entirely: a raw
+  `user.email = 'not-an-email'; await user.save()` throws `ValidationError:
+  Path \`email\` is invalid`; a 255-char local-part similarly throws on
+  `maxlength` — confirms the validators in `User.js` are real, not just the
+  controller's own 400s.
+- Regression pass on the same running instance: `GET /verification/status`,
+  `GET /profile/me` (404 for a profile-less user), `PUT /profile/me`, `GET
+  /discovery`, `GET /matches`, and `GET /subscriptions/me` all responded
+  exactly as before — this chunk touches nothing on those paths.
+
+**Read-only findings for Chunk 2 (no code changed for these):**
+- No code stores or uses a Paystack `customer_code` or `authorization_code`,
+  and nothing calls a Paystack "charge authorization" / recurring-charge
+  endpoint — `services/paystack.js` only ever calls `POST
+  /transaction/initialize`. `Subscription.paystackSubscriptionCode` is written
+  opportunistically by the webhook (`PaymentsController.js`) only when
+  Paystack's `charge.success` payload happens to include a
+  `data.subscription.subscription_code` (i.e. only when a dashboard Plan via
+  `PAYSTACK_UNLIMITED_PLAN_CODE` was used) — it is never read back or used to
+  trigger a charge anywhere in the codebase. The "Unlimited" plan is a one-off
+  30-day charge: `PaymentsController.js`'s `THIRTY_DAYS_MS` sets
+  `currentPeriodEnd` 30 days out on each successful `charge.success`, and
+  reactivation after expiry requires the user to start a brand-new checkout
+  (`POST /subscriptions/subscribe/paystack` mints a fresh `reference`) — there
+  is no auto-renewal/auto-charge path that email or any saved card would feed.
+- `middlewares/auth.js` loads `req.user` via a bare `User.findById(decoded.sub)`
+  with no `.select()`/projection, so the new `email` field is included on
+  `req.user` automatically — no middleware change needed for Chunk 2 to read
+  `req.user.email`.
+
+**Not built (later chunks):** `SubscriptionController`/`PurchasesController`
+still synthesize `${phone}@users.sabipesin.com` — real emails are not yet sent
+to Paystack (Chunk 2). No mobile changes (Chunks 3–4).
+
+---
+
 ## Mobile subscription screen — Paystack upgrade + status (Phase 6, mobile)
 
 **Built:** The mobile side of the Unlimited plan: a status read, a Paystack
