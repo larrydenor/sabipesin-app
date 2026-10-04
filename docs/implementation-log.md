@@ -6,6 +6,135 @@ feature, committed together with that feature's code.
 
 ---
 
+## Receipt email — mobile Subscription screen field + account API (mobile only, Chunks 3 & 4 of 4)
+
+**Why:** Chunks 1–2 built the backend (optional account `email`, `GET/PUT
+/account/email`, and both Paystack init calls preferring it over the
+synthesized placeholder). Nothing on mobile could set it yet. This closes the
+loop: an optional "Email for your receipt" field on `SubscriptionScreen.tsx`,
+shown only where the Upgrade button already shows, following Apple's
+requirement that any personal-info ask be optional and never block app use.
+
+**New file — `src/api/account.ts`:** `getMyEmail()` (`GET /account/email`) and
+`updateMyEmail(email: string | null)` (`PUT /account/email`), following
+`profile.ts`'s thin-typed-wrapper convention.
+
+**`SubscriptionScreen.tsx` changes:**
+- New state: `email` (live input), `savedEmail` (last value confirmed by the
+  backend, `null` = nothing saved), `emailError`, `emailSaveState` ('idle' |
+  'saving' | 'saved'), `emailNotice` (shown only when an Upgrade-triggered save
+  fails for a non-format reason).
+- `load()` now also calls `getMyEmail()` after the subscription-status fetch
+  succeeds, to pre-fill the field. Best-effort: a failed prefill just leaves
+  the field blank rather than putting the whole screen in the error state —
+  only the required status fetch can do that.
+- Local `Field` component added (label + "Optional" badge + inline error),
+  mirroring `ProfileSetupScreen`'s local (unexported) `Field` — duplicated
+  rather than extracted into a shared component, since `ProfileSetupScreen`
+  doesn't export it and extracting wasn't asked for.
+- `validateEmailFormat()` mirrors the backend's own rule exactly — trimmed,
+  max 254 chars, `/^\S+@\S+\.\S+$/` — so a malformed value is caught locally
+  before any network call ever fires.
+- `trySaveEmail()` is the shared core: validates locally (returns `{ ok:
+  false, reason: 'format' }` on failure, setting the inline error — nothing
+  sent to the network), no-ops if the trimmed value already matches
+  `savedEmail`, otherwise calls `updateMyEmail()` and returns `{ ok: false,
+  reason: 'save-failed' }` on a network/server error. Returning a reason
+  (rather than a bare boolean) was necessary so `onUpgrade` can tell "don't
+  proceed" apart from "proceed but flag it" without re-reading `emailError`
+  state right after setting it (a stale-closure trap — `setState` calls don't
+  resolve synchronously, so a same-tick read of the state variable would see
+  the pre-update value).
+- The standalone **Save** button calls `trySaveEmail()` directly; a
+  `'save-failed'` result (but not `'format'`, which already shows its own
+  error) surfaces a generic "Could not save your email" inline message.
+- `onUpgrade()` now calls `trySaveEmail()` first. A `'format'` failure returns
+  immediately — inline error shown, no checkout, exactly like before this
+  change for a bad value. A `'save-failed'` result does **not** block — it
+  sets `emailNotice` ("We couldn't save your receipt email, but your upgrade
+  will continue.") and falls through to the existing checkout flow unchanged.
+  Nothing else in `onUpgrade` (the `Platform.OS !== 'android'` guard,
+  `subscribeToUnlimited()`, `WebBrowser.openAuthSessionAsync`,
+  `pollUntilActiveOrTimeout()`, the 409 handling) was touched.
+- Visibility: the email field and the Upgrade button now share one boolean,
+  `showUpgradeFlow = !isActiveUnlimited && Platform.OS === 'android'` — the
+  exact condition the Upgrade button already used, so the field can never show
+  somewhere the button doesn't (or vice versa). The iOS "coming soon" notice
+  and the existing polling/timeout/success notices are unchanged.
+
+**Smoke test — real device/simulator walkthrough, driven interactively by the
+user, one instruction at a time** (local mongod on a fresh scratch dbpath,
+port 27097, backend on `PORT=3333` to match mobile's default
+`EXPO_PUBLIC_API_BASE_URL=http://localhost:3333`, real Paystack sandbox key
+already in `.env`; two disposable phone numbers, `08011110001` and
+`08011110002`, neither Joe/Girl; OTP codes read from the backend's
+`[otp-dev-echo]` console line after the user tapped Send in the app — never
+requested by the assistant, so the user's own in-flight code was never
+clobbered):
+
+- **(a)** Fresh free account, no email: field rendered empty; tapping Upgrade
+  opened the real Paystack sandbox checkout (accepting iOS's "expo wants to
+  use paystack.com to sign in" `ASWebAuthenticationSession` prompt, which is
+  normal system behavior for `openAuthSessionAsync`, not app-specific).
+  Checkout was cancelled without paying each time in every case below, to
+  avoid actually activating a subscription mid-walkthrough; the resulting
+  honest "still processing" timeout after ~30s confirmed the untouched
+  polling logic was unaffected.
+- **(b)** Typed a valid email, tapped **Save** (saw the "Saved" confirmation),
+  then Upgrade: looked up the most recent Paystack sandbox transaction via
+  `GET /transaction` and confirmed `customer.email` was exactly that address.
+- **(c)** Typed a malformed value (`not-an-email`), tapped Upgrade directly:
+  inline "Enter a valid email address." error shown, no
+  `ASWebAuthenticationSession` prompt appeared — confirmed checkout never
+  opened, purely client-side rejection.
+- **(d)** Typed a different valid email **without** tapping Save, tapped
+  Upgrade directly: Paystack's API showed the new address on the resulting
+  transaction, and a direct read of the scratch DB confirmed the email was
+  actually persisted to the account (not just sent once) — proving the
+  save-before-checkout path in `trySaveEmail()` fired.
+- **(e)** Cleared the field, tapped Save (shown as "Saved" with an empty
+  field — confirmed with the user that this is the correct cleared state, not
+  a bug), then Upgrade: Paystack's API showed the next transaction back on the
+  synthesized `2348011110001@users.sabipesin.com` address.
+- **(f)** A second account (`08011110002`) with its `Subscription` doc set
+  directly to `unlimited`/`active` in the scratch DB (bypassing real payment —
+  this case only tests UI state, not a purchase): screen showed "Unlimited"
+  plan, a renewal date, **no** email field, and **no** Upgrade button.
+- **(g)** After fully reverting the temporary iOS-testing override (see
+  below) and reloading, the same free account on (real, non-overridden) iOS
+  showed the "coming soon" notice and **no** email field.
+
+**Temporary iOS-testing override, used only during the walkthrough above —
+confirmed fully removed before this entry:** a `TEMP_ALLOW_IOS_TESTING` const
+(same technique as the prior Phase 6 Subscription-screen slice) temporarily
+widened `showUpgradeFlow` and the `onUpgrade`/iOS-notice guards to treat iOS
+as the Android path, since this environment has no Android emulator. Removal
+was verified three ways: a byte-for-byte `diff` against a snapshot of the file
+taken before the override was introduced (zero output), a clean `tsc
+--noEmit`, and `git --no-pager grep --cached "TEMP_ALLOW_IOS_TESTING" --
+mobile/` after staging the two changed files (exit code 1 — no match), with
+the files unstaged again immediately after. **The committed code never
+allows iOS down this path** — `onUpgrade` still returns early unless
+`Platform.OS === 'android'`, and the field/button condition is unchanged from
+what ships.
+
+**Incidental, pre-existing issues hit along the way (not caused by this
+chunk, not fixed here):** a double-tap on "Send code" superseded the first
+OTP (expected — only the latest code is ever valid, per
+`AuthController.requestOtp`'s supersede-on-resend logic); the header's ⭐/⚙
+icons render as "?" glyphs in this simulator (already tracked in
+`sabipesin-todo-list.md`); and a stale Metro bundle survived a plain in-app
+reload after the override was reverted, requiring `expo start -c` to actually
+clear — a Metro caching quirk, not a code issue.
+
+**Not verified (flagged in `sabipesin-todo-list.md`):** the Android path for
+this whole flow (same gap as the original Subscription-screen slice — no
+Android emulator/device available here), and whether Paystack's sandbox
+actually *sent* a receipt email for any of the real addresses used above —
+there's no tunnel in this environment, so that remains unconfirmed.
+
+---
+
 ## Receipt email — wire saved email into Paystack init (backend only, Chunk 2 of 4)
 
 **Why:** Chunk 1 added the optional, unverified `email` field and `GET/PUT
