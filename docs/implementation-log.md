@@ -6,6 +6,82 @@ feature, committed together with that feature's code.
 
 ---
 
+## Receipt email — wire saved email into Paystack init (backend only, Chunk 2 of 4)
+
+**Why:** Chunk 1 added the optional, unverified `email` field and `GET/PUT
+/account/email`, but `SubscriptionController` and `PurchasesController` still
+synthesized `${phone}@users.sabipesin.com` on every Paystack init, so real
+payers still never got their Paystack receipt. This chunk only flips the two
+`email` assignments to prefer the saved address — the exact seam both
+controllers already called out (`profile?.email || synthesized`, now
+`req.user.email || synthesized`).
+
+**Built:** In both `SubscriptionController.subscribeWithPaystack` and
+`PurchasesController.startPaystackPurchase`, changed:
+```js
+const email = `${req.user.phone}@users.sabipesin.com`;
+```
+to:
+```js
+const email = req.user.email || `${req.user.phone}@users.sabipesin.com`;
+```
+`req.user` already carries `email` with no middleware change needed (confirmed
+in Chunk 1: `middlewares/auth.js`'s `User.findById` has no projection). Nothing
+else in either controller changed — the 409 double-subscribe guard, the
+`Transaction.create()` call, the reference generation, and `PaymentsController`
+(webhook/settlement) are byte-for-byte unchanged from before this chunk. The
+surrounding launch-blocker comments in both controllers are now stale (the
+blocker they describe is resolved) but were deliberately left untouched per
+this chunk's explicit scope — a follow-up cleanup, not done here.
+
+**Smoke test** (real Paystack sandbox — `sk_test_…` key already in `.env` — on
+a fresh local mongod scratch dbpath, port 27098/`PORT=3398`; two disposable
+accounts, neither Joe/Girl; no tunnel, so no webhook delivery from Paystack
+itself — only locally-crafted signed requests, see the regression item below):
+- `POST /subscriptions/subscribe/paystack` on an account with no email → `201`
+  with an `authorizationUrl`; looked the resulting `reference` up via
+  Paystack's own `GET /transaction/verify/:reference` and confirmed
+  `data.customer.email` is the synthesized `+2340000001001@users.sabipesin.com`.
+- Same call on an account with `email` set via `PUT /account/email` → `201`;
+  Paystack's `transaction/verify` showed `data.customer.email` as the real
+  address (`receipt-smoke-chunk2@example.com`), not the synthesized one.
+- Repeated both cases for `POST /purchases/boost/paystack` and `POST
+  /purchases/superlike/paystack` — same result in all four combinations,
+  verified directly against Paystack's API each time, not just the init
+  response.
+- `PUT /account/email { email: null }` on the with-email account, then a fresh
+  `POST /purchases/superlike/paystack` → Paystack's `transaction/verify` showed
+  `data.customer.email` back to the synthesized `+2340000001002@users
+  .sabipesin.com` — confirms the fallback re-engages the moment the saved
+  email is cleared, not just at account creation.
+- Regression — a hand-built, correctly HMAC-SHA512-signed `charge.success`
+  payload (same construction as `services/paystack.verifyWebhookSignature`,
+  signed with the real sandbox secret) for the with-email account's real
+  subscribe `reference` and `metadata.userId`, POSTed directly to `/payments
+  /webhook/paystack` (no live Paystack delivery — no tunnel) → `200 { received:
+  true }`, and `GET /subscriptions/me` afterward showed `plan: "unlimited",
+  status: "active"`. The email had already been cleared to `null` on this
+  account by the previous step, so this proves activation never reads or
+  depends on `email` — only `metadata.userId` and `reference`, as found in
+  Chunk 1. A second `POST /subscriptions/subscribe/paystack` on the now-active
+  account → `409` (double-subscribe guard untouched). The same payload replayed
+  with a garbage `x-paystack-signature` → `401 { error: "Invalid signature" }`
+  (signature check untouched).
+
+**Not verified (can't be, from here):** whether Paystack's sandbox actually
+*sent* a receipt email to either address. There is no tunnel in this
+environment, so Paystack never delivered a webhook or any other callback here,
+and nothing about email delivery is observable via the API lookups above (they
+only show what `customer.email` Paystack recorded against the transaction).
+This chunk confirms the correct address reaches Paystack's own records — not
+that an email was received.
+
+**Not built (later chunks):** no mobile changes — the Subscription screen UI
+for setting an email, and the `mobile/src/api/account.ts` client, are Chunks
+3–4.
+
+---
+
 ## Receipt email — account-level email field + `GET/PUT /account/email` (backend only, Chunk 1 of 4)
 
 **Why:** `SubscriptionController.subscribeWithPaystack` and `PurchasesController
