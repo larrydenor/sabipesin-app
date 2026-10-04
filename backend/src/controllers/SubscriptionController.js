@@ -66,7 +66,7 @@ async function subscribeWithPaystack(req, res) {
     // be captured (its own email-capture slice) before Paystack goes live. The
     // seam is here: once Profile carries an email, read it first and fall back to
     // the synthesized address only when absent (`profile?.email || synthesized`).
-    const email = `${req.user.phone}@users.sabipesin.com`;
+    const email = req.user.email || `${req.user.phone}@users.sabipesin.com`;
 
     // A PaystackError here propagates to the central error handler (-> 502); the
     // throw stops execution, so nothing is persisted on a failed init.

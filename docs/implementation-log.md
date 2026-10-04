@@ -6,6 +6,300 @@ feature, committed together with that feature's code.
 
 ---
 
+## Receipt email — mobile Subscription screen field + account API (mobile only, Chunks 3 & 4 of 4)
+
+**Why:** Chunks 1–2 built the backend (optional account `email`, `GET/PUT
+/account/email`, and both Paystack init calls preferring it over the
+synthesized placeholder). Nothing on mobile could set it yet. This closes the
+loop: an optional "Email for your receipt" field on `SubscriptionScreen.tsx`,
+shown only where the Upgrade button already shows, following Apple's
+requirement that any personal-info ask be optional and never block app use.
+
+**New file — `src/api/account.ts`:** `getMyEmail()` (`GET /account/email`) and
+`updateMyEmail(email: string | null)` (`PUT /account/email`), following
+`profile.ts`'s thin-typed-wrapper convention.
+
+**`SubscriptionScreen.tsx` changes:**
+- New state: `email` (live input), `savedEmail` (last value confirmed by the
+  backend, `null` = nothing saved), `emailError`, `emailSaveState` ('idle' |
+  'saving' | 'saved'), `emailNotice` (shown only when an Upgrade-triggered save
+  fails for a non-format reason).
+- `load()` now also calls `getMyEmail()` after the subscription-status fetch
+  succeeds, to pre-fill the field. Best-effort: a failed prefill just leaves
+  the field blank rather than putting the whole screen in the error state —
+  only the required status fetch can do that.
+- Local `Field` component added (label + "Optional" badge + inline error),
+  mirroring `ProfileSetupScreen`'s local (unexported) `Field` — duplicated
+  rather than extracted into a shared component, since `ProfileSetupScreen`
+  doesn't export it and extracting wasn't asked for.
+- `validateEmailFormat()` mirrors the backend's own rule exactly — trimmed,
+  max 254 chars, `/^\S+@\S+\.\S+$/` — so a malformed value is caught locally
+  before any network call ever fires.
+- `trySaveEmail()` is the shared core: validates locally (returns `{ ok:
+  false, reason: 'format' }` on failure, setting the inline error — nothing
+  sent to the network), no-ops if the trimmed value already matches
+  `savedEmail`, otherwise calls `updateMyEmail()` and returns `{ ok: false,
+  reason: 'save-failed' }` on a network/server error. Returning a reason
+  (rather than a bare boolean) was necessary so `onUpgrade` can tell "don't
+  proceed" apart from "proceed but flag it" without re-reading `emailError`
+  state right after setting it (a stale-closure trap — `setState` calls don't
+  resolve synchronously, so a same-tick read of the state variable would see
+  the pre-update value).
+- The standalone **Save** button calls `trySaveEmail()` directly; a
+  `'save-failed'` result (but not `'format'`, which already shows its own
+  error) surfaces a generic "Could not save your email" inline message.
+- `onUpgrade()` now calls `trySaveEmail()` first. A `'format'` failure returns
+  immediately — inline error shown, no checkout, exactly like before this
+  change for a bad value. A `'save-failed'` result does **not** block — it
+  sets `emailNotice` ("We couldn't save your receipt email, but your upgrade
+  will continue.") and falls through to the existing checkout flow unchanged.
+  Nothing else in `onUpgrade` (the `Platform.OS !== 'android'` guard,
+  `subscribeToUnlimited()`, `WebBrowser.openAuthSessionAsync`,
+  `pollUntilActiveOrTimeout()`, the 409 handling) was touched.
+- Visibility: the email field and the Upgrade button now share one boolean,
+  `showUpgradeFlow = !isActiveUnlimited && Platform.OS === 'android'` — the
+  exact condition the Upgrade button already used, so the field can never show
+  somewhere the button doesn't (or vice versa). The iOS "coming soon" notice
+  and the existing polling/timeout/success notices are unchanged.
+
+**Smoke test — real device/simulator walkthrough, driven interactively by the
+user, one instruction at a time** (local mongod on a fresh scratch dbpath,
+port 27097, backend on `PORT=3333` to match mobile's default
+`EXPO_PUBLIC_API_BASE_URL=http://localhost:3333`, real Paystack sandbox key
+already in `.env`; two disposable phone numbers, `08011110001` and
+`08011110002`, neither Joe/Girl; OTP codes read from the backend's
+`[otp-dev-echo]` console line after the user tapped Send in the app — never
+requested by the assistant, so the user's own in-flight code was never
+clobbered):
+
+- **(a)** Fresh free account, no email: field rendered empty; tapping Upgrade
+  opened the real Paystack sandbox checkout (accepting iOS's "expo wants to
+  use paystack.com to sign in" `ASWebAuthenticationSession` prompt, which is
+  normal system behavior for `openAuthSessionAsync`, not app-specific).
+  Checkout was cancelled without paying each time in every case below, to
+  avoid actually activating a subscription mid-walkthrough; the resulting
+  honest "still processing" timeout after ~30s confirmed the untouched
+  polling logic was unaffected.
+- **(b)** Typed a valid email, tapped **Save** (saw the "Saved" confirmation),
+  then Upgrade: looked up the most recent Paystack sandbox transaction via
+  `GET /transaction` and confirmed `customer.email` was exactly that address.
+- **(c)** Typed a malformed value (`not-an-email`), tapped Upgrade directly:
+  inline "Enter a valid email address." error shown, no
+  `ASWebAuthenticationSession` prompt appeared — confirmed checkout never
+  opened, purely client-side rejection.
+- **(d)** Typed a different valid email **without** tapping Save, tapped
+  Upgrade directly: Paystack's API showed the new address on the resulting
+  transaction, and a direct read of the scratch DB confirmed the email was
+  actually persisted to the account (not just sent once) — proving the
+  save-before-checkout path in `trySaveEmail()` fired.
+- **(e)** Cleared the field, tapped Save (shown as "Saved" with an empty
+  field — confirmed with the user that this is the correct cleared state, not
+  a bug), then Upgrade: Paystack's API showed the next transaction back on the
+  synthesized `2348011110001@users.sabipesin.com` address.
+- **(f)** A second account (`08011110002`) with its `Subscription` doc set
+  directly to `unlimited`/`active` in the scratch DB (bypassing real payment —
+  this case only tests UI state, not a purchase): screen showed "Unlimited"
+  plan, a renewal date, **no** email field, and **no** Upgrade button.
+- **(g)** After fully reverting the temporary iOS-testing override (see
+  below) and reloading, the same free account on (real, non-overridden) iOS
+  showed the "coming soon" notice and **no** email field.
+
+**Temporary iOS-testing override, used only during the walkthrough above —
+confirmed fully removed before this entry:** a `TEMP_ALLOW_IOS_TESTING` const
+(same technique as the prior Phase 6 Subscription-screen slice) temporarily
+widened `showUpgradeFlow` and the `onUpgrade`/iOS-notice guards to treat iOS
+as the Android path, since this environment has no Android emulator. Removal
+was verified three ways: a byte-for-byte `diff` against a snapshot of the file
+taken before the override was introduced (zero output), a clean `tsc
+--noEmit`, and `git --no-pager grep --cached "TEMP_ALLOW_IOS_TESTING" --
+mobile/` after staging the two changed files (exit code 1 — no match), with
+the files unstaged again immediately after. **The committed code never
+allows iOS down this path** — `onUpgrade` still returns early unless
+`Platform.OS === 'android'`, and the field/button condition is unchanged from
+what ships.
+
+**Incidental, pre-existing issues hit along the way (not caused by this
+chunk, not fixed here):** a double-tap on "Send code" superseded the first
+OTP (expected — only the latest code is ever valid, per
+`AuthController.requestOtp`'s supersede-on-resend logic); the header's ⭐/⚙
+icons render as "?" glyphs in this simulator (already tracked in
+`sabipesin-todo-list.md`); and a stale Metro bundle survived a plain in-app
+reload after the override was reverted, requiring `expo start -c` to actually
+clear — a Metro caching quirk, not a code issue.
+
+**Not verified (flagged in `sabipesin-todo-list.md`):** the Android path for
+this whole flow (same gap as the original Subscription-screen slice — no
+Android emulator/device available here), and whether Paystack's sandbox
+actually *sent* a receipt email for any of the real addresses used above —
+there's no tunnel in this environment, so that remains unconfirmed.
+
+---
+
+## Receipt email — wire saved email into Paystack init (backend only, Chunk 2 of 4)
+
+**Why:** Chunk 1 added the optional, unverified `email` field and `GET/PUT
+/account/email`, but `SubscriptionController` and `PurchasesController` still
+synthesized `${phone}@users.sabipesin.com` on every Paystack init, so real
+payers still never got their Paystack receipt. This chunk only flips the two
+`email` assignments to prefer the saved address — the exact seam both
+controllers already called out (`profile?.email || synthesized`, now
+`req.user.email || synthesized`).
+
+**Built:** In both `SubscriptionController.subscribeWithPaystack` and
+`PurchasesController.startPaystackPurchase`, changed:
+```js
+const email = `${req.user.phone}@users.sabipesin.com`;
+```
+to:
+```js
+const email = req.user.email || `${req.user.phone}@users.sabipesin.com`;
+```
+`req.user` already carries `email` with no middleware change needed (confirmed
+in Chunk 1: `middlewares/auth.js`'s `User.findById` has no projection). Nothing
+else in either controller changed — the 409 double-subscribe guard, the
+`Transaction.create()` call, the reference generation, and `PaymentsController`
+(webhook/settlement) are byte-for-byte unchanged from before this chunk. The
+surrounding launch-blocker comments in both controllers are now stale (the
+blocker they describe is resolved) but were deliberately left untouched per
+this chunk's explicit scope — a follow-up cleanup, not done here.
+
+**Smoke test** (real Paystack sandbox — `sk_test_…` key already in `.env` — on
+a fresh local mongod scratch dbpath, port 27098/`PORT=3398`; two disposable
+accounts, neither Joe/Girl; no tunnel, so no webhook delivery from Paystack
+itself — only locally-crafted signed requests, see the regression item below):
+- `POST /subscriptions/subscribe/paystack` on an account with no email → `201`
+  with an `authorizationUrl`; looked the resulting `reference` up via
+  Paystack's own `GET /transaction/verify/:reference` and confirmed
+  `data.customer.email` is the synthesized `+2340000001001@users.sabipesin.com`.
+- Same call on an account with `email` set via `PUT /account/email` → `201`;
+  Paystack's `transaction/verify` showed `data.customer.email` as the real
+  address (`receipt-smoke-chunk2@example.com`), not the synthesized one.
+- Repeated both cases for `POST /purchases/boost/paystack` and `POST
+  /purchases/superlike/paystack` — same result in all four combinations,
+  verified directly against Paystack's API each time, not just the init
+  response.
+- `PUT /account/email { email: null }` on the with-email account, then a fresh
+  `POST /purchases/superlike/paystack` → Paystack's `transaction/verify` showed
+  `data.customer.email` back to the synthesized `+2340000001002@users
+  .sabipesin.com` — confirms the fallback re-engages the moment the saved
+  email is cleared, not just at account creation.
+- Regression — a hand-built, correctly HMAC-SHA512-signed `charge.success`
+  payload (same construction as `services/paystack.verifyWebhookSignature`,
+  signed with the real sandbox secret) for the with-email account's real
+  subscribe `reference` and `metadata.userId`, POSTed directly to `/payments
+  /webhook/paystack` (no live Paystack delivery — no tunnel) → `200 { received:
+  true }`, and `GET /subscriptions/me` afterward showed `plan: "unlimited",
+  status: "active"`. The email had already been cleared to `null` on this
+  account by the previous step, so this proves activation never reads or
+  depends on `email` — only `metadata.userId` and `reference`, as found in
+  Chunk 1. A second `POST /subscriptions/subscribe/paystack` on the now-active
+  account → `409` (double-subscribe guard untouched). The same payload replayed
+  with a garbage `x-paystack-signature` → `401 { error: "Invalid signature" }`
+  (signature check untouched).
+
+**Not verified (can't be, from here):** whether Paystack's sandbox actually
+*sent* a receipt email to either address. There is no tunnel in this
+environment, so Paystack never delivered a webhook or any other callback here,
+and nothing about email delivery is observable via the API lookups above (they
+only show what `customer.email` Paystack recorded against the transaction).
+This chunk confirms the correct address reaches Paystack's own records — not
+that an email was received.
+
+**Not built (later chunks):** no mobile changes — the Subscription screen UI
+for setting an email, and the `mobile/src/api/account.ts` client, are Chunks
+3–4.
+
+---
+
+## Receipt email — account-level email field + `GET/PUT /account/email` (backend only, Chunk 1 of 4)
+
+**Why:** `SubscriptionController.subscribeWithPaystack` and `PurchasesController
+.startPaystackPurchase` synthesize `${phone}@users.sabipesin.com` for Paystack
+because accounts are phone-only — so real payers never receive their Paystack
+receipt (tracked as a launch blocker, with the seam already noted in both
+controllers: `profile?.email || synthesized`). This chunk adds the optional
+email itself and the endpoints to manage it. It deliberately does **not**
+touch `SubscriptionController`, `PurchasesController`, or any payment code —
+wiring the real address into the Paystack `email` field is Chunk 2.
+
+**Built:**
+- `models/User.js` — new `email` field: `{ type: String, default: null,
+  lowercase: true, trim: true, maxlength: 254, match: /^\S+@\S+\.\S+$/ }`. No
+  unique index — this is a receipt-delivery convenience field, not an identity
+  key, so two accounts may share an address. Never verified, never used for
+  login/OTP/recovery; auth stays phone-only and untouched.
+- `AccountController.getEmail` — `GET /account/email` → `{ email: string |
+  null }`, read from `req.user` (already loaded by `middlewares/auth.js`'s
+  `User.findById`, no projection excludes it — confirmed below).
+- `AccountController.updateEmail` — `PUT /account/email` accepts `{ email:
+  string | null }`. Trims and lowercases; empty string or `null` clears it back
+  to `null`. Explicit pre-checks (same style as `updateDiscoverySettings`)
+  return `400` with a `code` before touching the DB: `INVALID_EMAIL` (not a
+  string, or fails the match regex) and `EMAIL_TOO_LONG` (> 254 chars after
+  trim). Self-only — the target is always `req.userId`, via the same
+  `req.user` the auth middleware already loaded (no other-account lookup path
+  exists), mirroring `deleteAccount`.
+- Both routes registered in `routes.js` next to `DELETE /account`, behind `auth`.
+
+**Mongoose 5.7 validator gotcha — deliberately avoided `findOneAndUpdate`:**
+this codebase's Mongoose version does not run schema validators on update
+queries unless `runValidators: true` is explicitly passed. `updateEmail` calls
+`req.user.save()` instead (save() always runs validators), so the schema's own
+`match`/`maxlength` validators are a real second line of defense behind the
+controller's explicit checks — proved directly below, not assumed.
+
+**Smoke test** (local mongod, scratch dbpath on port 27099, `PORT=3399`,
+disposable accounts minted directly via `utils/jwt.issueTokens` — no OTP, no
+Atlas):
+- `GET /account/email` on a fresh account → `200 { email: null }`.
+- `PUT { email: "user@example.com" }` → `200`; subsequent `GET` reflects it.
+- `PUT { email: "  Test@Example.COM " }` → stored/returned as
+  `test@example.com` (trimmed + lowercased).
+- `PUT { email: "not-an-email" }` → `400 { error, code: "INVALID_EMAIL" }`.
+- `PUT` with a 296-char value → `400 { error, code: "EMAIL_TOO_LONG" }`.
+- `PUT { email: "" }` and `PUT { email: null }` both → `200 { email: null }`.
+- No `Authorization` header → `401`.
+- Two different accounts both `PUT` the same address → both `200` (no
+  uniqueness conflict).
+- Set an email, then `DELETE /account` → confirmed via a direct `User.findOne`
+  against the scratch DB that no User document remains (not just that the
+  field was cleared).
+- Schema-validator proof, bypassing the controller entirely: a raw
+  `user.email = 'not-an-email'; await user.save()` throws `ValidationError:
+  Path \`email\` is invalid`; a 255-char local-part similarly throws on
+  `maxlength` — confirms the validators in `User.js` are real, not just the
+  controller's own 400s.
+- Regression pass on the same running instance: `GET /verification/status`,
+  `GET /profile/me` (404 for a profile-less user), `PUT /profile/me`, `GET
+  /discovery`, `GET /matches`, and `GET /subscriptions/me` all responded
+  exactly as before — this chunk touches nothing on those paths.
+
+**Read-only findings for Chunk 2 (no code changed for these):**
+- No code stores or uses a Paystack `customer_code` or `authorization_code`,
+  and nothing calls a Paystack "charge authorization" / recurring-charge
+  endpoint — `services/paystack.js` only ever calls `POST
+  /transaction/initialize`. `Subscription.paystackSubscriptionCode` is written
+  opportunistically by the webhook (`PaymentsController.js`) only when
+  Paystack's `charge.success` payload happens to include a
+  `data.subscription.subscription_code` (i.e. only when a dashboard Plan via
+  `PAYSTACK_UNLIMITED_PLAN_CODE` was used) — it is never read back or used to
+  trigger a charge anywhere in the codebase. The "Unlimited" plan is a one-off
+  30-day charge: `PaymentsController.js`'s `THIRTY_DAYS_MS` sets
+  `currentPeriodEnd` 30 days out on each successful `charge.success`, and
+  reactivation after expiry requires the user to start a brand-new checkout
+  (`POST /subscriptions/subscribe/paystack` mints a fresh `reference`) — there
+  is no auto-renewal/auto-charge path that email or any saved card would feed.
+- `middlewares/auth.js` loads `req.user` via a bare `User.findById(decoded.sub)`
+  with no `.select()`/projection, so the new `email` field is included on
+  `req.user` automatically — no middleware change needed for Chunk 2 to read
+  `req.user.email`.
+
+**Not built (later chunks):** `SubscriptionController`/`PurchasesController`
+still synthesize `${phone}@users.sabipesin.com` — real emails are not yet sent
+to Paystack (Chunk 2). No mobile changes (Chunks 3–4).
+
+---
+
 ## Mobile subscription screen — Paystack upgrade + status (Phase 6, mobile)
 
 **Built:** The mobile side of the Unlimited plan: a status read, a Paystack

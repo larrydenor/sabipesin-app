@@ -11,6 +11,20 @@ const UserSchema = new Schema({
         type: Date,
         default: null,
     },
+    // Optional receipt-delivery address (never required, never verified, never
+    // used for login/OTP/recovery — auth stays phone-only). Set via PUT
+    // /account/email so Paystack can mail a real receipt instead of the
+    // synthesized placeholder (see SubscriptionController). No unique index:
+    // this is a convenience field, not an identity key, so two accounts may
+    // share an address (e.g. a shared family inbox).
+    email: {
+        type: String,
+        default: null,
+        lowercase: true,
+        trim: true,
+        maxlength: 254,
+        match: /^\S+@\S+\.\S+$/,
+    },
     ninVerifiedAt: {
         type: Date,
         default: null,

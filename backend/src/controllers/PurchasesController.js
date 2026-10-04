@@ -42,7 +42,7 @@ async function startPaystackPurchase(req, res, type) {
     // Paystack requires an email, but accounts are phone-only (spec §3). Synthesize
     // the same stable placeholder the subscription path uses. ⚠ Same launch blocker
     // applies (receipts go to this address) — see SubscriptionController for the seam.
-    const email = `${req.user.phone}@users.sabipesin.com`;
+    const email = req.user.email || `${req.user.phone}@users.sabipesin.com`;
 
     // A PaystackError here propagates to the central error handler (-> 502); the
     // throw stops execution BEFORE the Transaction row is written, so a failed

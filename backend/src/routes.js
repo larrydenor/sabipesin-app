@@ -144,4 +144,12 @@ routes.delete('/users/:id/block', auth, asyncHandler(SafetyController.unblockUse
 // audit trail (that side soft-excludes the deleted user via utils/accounts.js).
 routes.delete('/account', auth, asyncHandler(AccountController.deleteAccount));
 
+// Optional receipt-delivery email (App Store guidance: any personal-info
+// request must be optional and never block app use). Self-only — the target
+// is always req.userId, same as DELETE /account above. Never verified, never
+// used for login/OTP/recovery (auth stays phone-only); stored on User and
+// read back by the Paystack subscribe/purchase paths once chunk 2 wires it in.
+routes.get('/account/email', auth, asyncHandler(AccountController.getEmail));
+routes.put('/account/email', auth, asyncHandler(AccountController.updateEmail));
+
 module.exports = routes;
