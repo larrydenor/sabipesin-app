@@ -34,8 +34,6 @@ A running list of things flagged along the way that aren't blocking right now, b
 
 - [ ] **Push notifications — not started, needs its own dedicated slice.** Zero push notification code exists yet. Real constraints worth planning around: Expo Go (used for all mobile testing so far) doesn't support remote push at all — testing requires building a proper EAS "development build" and a physical device, not the simulator. iOS needs the Apple Developer account (already planned) to generate push credentials; Android needs a Firebase project (similar to CraftRanked's existing setup). Best sequenced after the remaining core screens (verification, subscriptions, discovery settings) and alongside Phase 10 production readiness, not squeezed into regular feature work.
 
-- [ ] **Mobile: no token refresh mid-session.** The 15-minute access token has no refresh flow on mobile yet — when it expires, the chat socket drops and shows an honest "offline" notice rather than silently failing, but a real user's chat going offline every 15 minutes is a genuinely bad experience. Needs a proper refresh-on-401 (or proactive refresh before expiry) path before launch — this is a real launch blocker, not cosmetic polish.
-
 - [x] **Gender/matching model resolved.** Product is opposite-sex matching only, by deliberate design — not a legal-review blocker, since the discovery filter never offers same-sex matching as a feature in the first place. `gender` uses a simple male/female enum; discovery filtering derives directly from it (no separate `interestedIn` field needed). Confirmed live: Atlas had zero profiles at the time of this change, so no migration was needed. **Residual watch item:** the discovery filter's "silent exclusion for non-enum/missing gender" behavior only becomes a real risk if a profile is ever created outside the mobile form's enum-constrained screen (a seed script, admin tool, or bulk import). If such a path is built later, re-run `{ gender: { $nin: ['male','female', null] } }` against production before trusting the filter.
 
 - [ ] **Tighten CORS before production.** Both the REST API and the new Socket.io layer currently allow `origin: '*'` (Socket.io was deliberately set to match the existing permissive REST config while building, not because it's safe long-term). This is a real security gap for Socket.io specifically — open CORS on an authenticated real-time connection means any website could attempt to open a socket to your server. Fix both together before any public launch: restrict to the actual frontend/app origins.
@@ -58,19 +56,40 @@ A running list of things flagged along the way that aren't blocking right now, b
 
 ---
 
-## Remaining build phases (per technical-build-spec.md)
+## Phase status (per technical-build-spec.md)
 
-Roughly in order, per the spec's recommended sequence:
+Verified against the actual code, not assumed from the spec's recommended order (audit, 7 Oct 2026):
 
-- [ ] **Finish Phase 2 — Profiles:** photo upload via Cloudinary (fresh SabiPesin account opened, not yet wired in), and the `PUT /profile/discovery-settings` endpoint that actually enforces the reciprocity rule (`showOnlyNinVerified`) at the API layer
-- [ ] **Phase 3 — Discovery & Matching:** geo query, swipe, match creation
-- [ ] **Phase 4 — Messaging:** Socket.io, conversation/message models, anti-scam keyword flagging
-- [ ] **Phase 5 — Trust & Verification:** QoreID NIN/selfie integration, reciprocity rule end to end
-- [ ] **Phase 6 — Payments:** Subscription + Transaction models, Paystack (Android/web) + StoreKit (iOS), verified webhooks both platforms
-- [ ] **Phase 7 — AI features:** compatibility scoring, conversation starters
-- [ ] **Phase 8 — Admin & moderation**
+- [x] **Phase 1 — Foundation.** Done. Phone OTP auth, JWT access/refresh, auth middleware.
+- [x] **Phase 2 — Profiles.** Done. Profile CRUD, Cloudinary photo upload, `PUT /profile/discovery-settings` enforcing the reciprocity rule.
+- [x] **Phase 3 — Discovery & Matching.** Done. Geo query, swipe, match creation.
+- [x] **Phase 4 — Messaging.** Done. Socket.io, conversation/message models, anti-scam keyword flagging.
+- [ ] **Phase 5 — Trust & Verification — partial.** `POST /verification/nin/start` and `GET /verification/status` are built, but `POST /verification/nin/webhook` (the vendor callback that actually sets `ninVerifiedAt`) was never built. Also blocked on the QoreID sandbox-subscription gap above — the NIN+selfie flow has never been exercised end to end with a real vendor response.
+- [ ] **Phase 6 — Payments — partial.** Paystack path (Android/web) is fully built: Subscription + Transaction models, `/subscriptions/me`, `/subscriptions/subscribe/paystack`, `/purchases/boost|superlike/paystack`, signature-verified `/payments/webhook/paystack`. No iOS/StoreKit routes exist. See the payments platform decision below — this phase's remaining scope has changed.
+- [ ] **Phase 7 — AI features — not started.** No AI/ML code, libraries, or routes exist anywhere in the repo. Per `tindev-to-african-dating-app-plan.md`, scope is compatibility scoring + conversation-starter generation via the Anthropic API (Claude) — not human-assisted curation.
+- [ ] **Phase 8 — Admin & moderation — not started.** No `/admin/*` routes or admin controllers exist. `User.role` reserves an `'admin'` enum value and `Report.status` reserves a moderation lifecycle, but nothing reads or acts on either yet.
 - [ ] **Phase 9 — Testing:** broader end-to-end pass once more phases exist (note: less debt here than usual, since every PR so far has been tested before merge, not deferred)
 - [ ] **Phase 10 — Production deployment:** App Store Connect setup, 17+ age rating, reviewer demo account (bypasses OTP/NIN in a controlled way), StoreKit product configuration
+
+---
+
+## Payments platform decision (5 Oct 2026)
+
+In-app purchases (Unlimited subscription, boosts, superlikes) will go through **Google Play Billing** (Android) and **Apple StoreKit** (iOS) — not Paystack — because both app stores require their own billing for in-app digital goods. The existing Paystack backend (Subscription + Transaction models, `/subscriptions/me`, the Paystack webhook) stays as-is; it's being extended, not replaced.
+
+- [ ] Google Play purchase verification + Google Play real-time developer notifications (server-side)
+- [ ] iOS StoreKit receipt verification + App Store Server Notifications v2 (server-side)
+- [ ] Extend `paymentPlatform` (`Subscription`/`Transaction` models) to cover `google_play`, alongside the existing `ios_iap` / `paystack` values
+- [ ] **Real purchase testing is blocked until Apple and Google enrollment completes** — nothing above can be verified end-to-end before then.
+
+---
+
+## Known gaps (docs audit, 7 Oct 2026)
+
+- [ ] **`POST /auth/logout` never built.** Listed in the spec (`technical-build-spec.md` §6); mobile just drops the tokens client-side on sign-out, no server call.
+- [ ] **No mobile UI for report, block, or account deletion.** All three exist on the backend only (`SafetyController`, `AccountController`) — there's no screen or flow to trigger them from the app.
+- [ ] **`frontend/` is the untouched original Tindev web app**, not part of SabiPesin — never touched since the fork, per the spec's "almost none of its actual logic survives" note.
+- [ ] **Root `README.md` is still Tindev's original Rocketseat-bootcamp README** — not updated for SabiPesin.
 
 ---
 
@@ -85,3 +104,6 @@ Roughly in order, per the spec's recommended sequence:
 - [x] JWT issuance wired into OTP verify success path
 - [x] App-wide async error handling — no single bad request can crash the server anymore
 - [x] Profile model + `GET/PUT /profile/me` built, with `discoverySettings` and `photos` deliberately excluded from the general update endpoint to protect the reciprocity rule
+- [x] **Account deletion (backend).** `DELETE /account` (App Store Guideline 5.1.1(v)) — hard-deletes the caller's own User/Profile/Swipe docs and Cloudinary photos, cascades correctly, socket disconnect on delete. Mobile UI is still outstanding (see Known gaps above). (PR #27)
+- [x] **Subscription screen (mobile).** `SubscriptionScreen.tsx` — Paystack Unlimited upgrade flow and status display, reachable from the Discover header. (PR #29)
+- [x] **Receipt email.** Optional `GET/PUT /account/email` (self-only, never used for login/OTP/recovery) wired into the Paystack subscribe/purchase paths, with a receipt-email field added to the Subscription screen. (PR #30)
