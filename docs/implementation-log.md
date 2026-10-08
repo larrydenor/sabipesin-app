@@ -6,6 +6,93 @@ feature, committed together with that feature's code.
 
 ---
 
+## Report / Block — mobile UI (App Store Guideline 1.2)
+
+**Why:** The backend (`SafetyController`, `Report`/`Block` models, blocking
+wired into discovery/matches/conversations/sockets) landed on `feature/report-block`
+with no mobile UI. Apple Guideline 1.2 requires both report and block to be
+reachable from inside the app for UGC apps.
+
+**New file — `src/api/safety.ts`:** `reportUser(userId, reason, details?)`
+(`POST /users/:id/report`) and `blockUser(userId)` (`POST /users/:id/block`),
+following the existing thin-typed-wrapper convention. `REPORT_REASONS` mirrors
+the backend's `Report.REASONS` enum (`inappropriate_photos`, `harassment`,
+`scam_attempt`, `fake_profile`, `underage`, `other`) so the reason picker can't
+drift from the schema.
+
+**New screen — `src/screens/ReportUserScreen.tsx`:** reason list → optional
+note (client-capped at 1000 chars, matching the schema) → submit. On success,
+offers a one-tap "Block this person too" (reusing `blockUser`) so a reporter
+isn't left still seeing the person they just reported, plus a plain "Done" for
+report-only. Added as a new `ReportUser` stack route
+(`{ userId, userName?, onBlockedId, onDoneId }`) — `onBlockedId`/`onDoneId`
+resolve to callbacks supplied by whichever screen opened it (Discovery or
+Chat), since what "block succeeded" should do next (deck vs. nav stack)
+differs by origin.
+
+**Callback-registry decision:** route params first carried the callbacks
+directly (`onBlocked: () => void`), which triggered React Navigation's
+"Non-serializable values were found in the navigation state" warning. Fixed
+with a small `navigation/reportCallbacks.ts` registry — `registerCallback(fn)`
+stores the real function in a module-level `Map` and returns an opaque string
+id; only that id travels through route params. Chosen over a `source:
+'discovery' | 'chat'` param (have the origin screen react after the Report
+screen finishes) because Chat's block path calls `navigation.reset(...)` and
+discards Chat from the stack entirely — it's never re-focused to react to
+anything, so `ReportUserScreen` would have had to hardcode Chat's reset logic
+itself. The registry keeps the exact same closures with zero behavior change.
+
+**Entry points — overflow menus (`Alert.alert` action sheets, same pattern as
+`PhotoUploadScreen`'s existing confirms):**
+- `DiscoveryScreen.tsx`: a "⋯" button in the card's top-right corner (opposite
+  the verification badge). The card has no pan/gesture-responder of its own
+  (buttons-only deck, no swipe physics yet), so there was no gesture conflict
+  to work around.
+- `ChatScreen.tsx`: a "⋯" `headerRight`, added to the same `useLayoutEffect`
+  that already sets the header `title` (React Navigation replaces `options`
+  wholesale, so the two have to be set together). Rendered unconditionally so
+  the header doesn't jump on load, but `openOverflow` no-ops until
+  `conversation` (and therefore `otherId`) resolves — verified by reasoning
+  through the guard; tapping it during the brief pre-load window does nothing.
+
+**Block semantics (both screens):** blocking never calls `POST /swipes` — a
+blocked candidate is just dropped from the local Discovery deck (cursor
+advances, like a pass, without the backend ever recording a swipe decision).
+Blocking from Chat calls `navigation.reset({ index: 1, routes: [{ name:
+'Home' }, { name: 'Matches' }] })` — route names taken directly from
+`RootNavigator.tsx` (`Home` is the Discovery route) rather than assumed —
+instead of a plain `navigate`, so the blocked thread is dropped from history
+and Back from Matches still lands on Home. `MatchesScreen` needed no code
+changes: `GET /matches` already soft-excludes blocked pairs server-side, and
+the reset forces a fresh mount that refetches.
+
+**Verification:** backend contract tested live against a throwaway local
+`mongod` (scratch dbpath, port 27199) + backend (port 3398, `OTP_DEV_ECHO=true`),
+never Atlas, with two fresh synthetic accounts (OTP dev-echo, profiles with a
+manually-inserted photo doc to skip Cloudinary). Confirmed: report succeeds
+(201) and rejects a bad reason / self-report with the exact `code`s the mobile
+`ApiError` mapping expects; a baseline message sends fine pre-block; block is
+idempotent (201 then 200, same block id); after blocking, `GET /discovery`
+and `GET /matches` drop the pair on both sides, `POST /matches/:id/conversation`
+404s, and the socket `message:send` ack is `{ ok: false, error: "Messaging is
+unavailable with this user" }` in both directions. Mobile `tsc --noEmit`
+clean.
+
+On top of that, a full tap-through was completed manually in the iOS
+Simulator against the same local scratch DB (never Atlas), covering: report
+and block from Discovery; report and block from Chat, confirming the
+`navigation.reset` to `Home`/`Matches` and that Back from Matches lands on
+Discover rather than reopening the blocked thread; "Done" after submitting a
+report without blocking; a failed-network report surfacing a clear error; and
+the React Navigation "Non-serializable values" warning, which is gone after
+the callback-registry fix above.
+
+**Deferred:** no blocked-users list/unblock screen this slice (`GET
+/users/blocked`, `DELETE /users/:id/block` exist on the backend, unused by the
+app) — tracked in `docs/sabipesin-todo-list.md`.
+
+---
+
 ## Receipt email — mobile Subscription screen field + account API (mobile only, Chunks 3 & 4 of 4)
 
 **Why:** Chunks 1–2 built the backend (optional account `email`, `GET/PUT
