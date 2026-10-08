@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Image,
   Pressable,
   ScrollView,
@@ -21,8 +22,10 @@ import {
   SwipeAction,
   VerificationTier,
 } from '../api/discovery';
+import { blockUser } from '../api/safety';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { AppStackParamList } from '../navigation/types';
+import { registerCallback } from '../navigation/reportCallbacks';
 import { colors, spacing } from '../theme';
 
 // A formed match we can act on: the candidate to show in the confirmation, plus
@@ -100,6 +103,11 @@ export function DiscoveryScreen() {
   const [matched, setMatched] = useState<MatchedState | null>(null);
   const [swipeError, setSwipeError] = useState<string | null>(null);
 
+  // Report/Block overflow. Blocking never records a swipe (POST /swipes) — the
+  // card is just removed from the local deck, same visual effect as a pass but
+  // without the backend ever seeing it as a like/pass decision.
+  const [blocking, setBlocking] = useState(false);
+
   const current: Candidate | undefined = deck[cursor];
 
   // Fetch the next page and append it. Used both for the very first load (reset)
@@ -167,6 +175,59 @@ export function DiscoveryScreen() {
     } finally {
       setSwiping(false);
     }
+  }
+
+  // Removes the given candidate from the deck without recording a swipe — used
+  // after a block, whether triggered directly or via the report screen's
+  // "block this person too". Only advances the cursor when the blocked user IS
+  // the card currently showing; a block via the report screen always refers to
+  // `current` since that's the only candidate this screen can report from.
+  function removeFromDeck(userId: string) {
+    if (current?.userId === userId) setCursor((c) => c + 1);
+  }
+
+  async function handleBlock(targetUserId: string) {
+    if (blocking) return;
+    setBlocking(true);
+    setSwipeError(null);
+    try {
+      await blockUser(targetUserId);
+      removeFromDeck(targetUserId);
+    } catch (e) {
+      const err = e as ApiError;
+      setSwipeError(err.message);
+    } finally {
+      setBlocking(false);
+    }
+  }
+
+  function confirmBlock(candidate: Candidate) {
+    const name = candidate.name || 'this person';
+    Alert.alert(`Block ${name}?`, 'They won’t be able to see your profile or message you, and you won’t see them in Discover anymore.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Block', style: 'destructive', onPress: () => void handleBlock(candidate.userId) },
+    ]);
+  }
+
+  function openOverflow(candidate: Candidate) {
+    const name = candidate.name || 'this person';
+    Alert.alert(name, undefined, [
+      {
+        text: 'Report',
+        onPress: () =>
+          navigation.navigate('ReportUser', {
+            userId: candidate.userId,
+            userName: candidate.name,
+            onBlockedId: registerCallback(() => {
+              removeFromDeck(candidate.userId);
+              navigation.goBack();
+            }),
+            onDoneId: registerCallback(() => navigation.goBack()),
+          }),
+      },
+      { text: 'Block', style: 'destructive', onPress: () => confirmBlock(candidate) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   }
 
   // --- Full-screen states -------------------------------------------------
@@ -246,6 +307,16 @@ export function DiscoveryScreen() {
               <View style={styles.badgeOverlay}>
                 <VerificationBadge tier={current.user.verificationTier} />
               </View>
+              <Pressable
+                onPress={() => openOverflow(current)}
+                disabled={swiping || blocking}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Report or block"
+                style={styles.overflowButton}
+              >
+                <Text style={styles.overflowText}>⋯</Text>
+              </Pressable>
             </View>
 
             <View style={styles.info}>
@@ -415,6 +486,25 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: spacing.sm,
     left: spacing.sm,
+  },
+  overflowButton: {
+    position: 'absolute',
+    top: spacing.sm,
+    right: spacing.sm,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(11, 18, 32, 0.75)',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  overflowText: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '800',
+    lineHeight: 18,
   },
   badge: {
     borderRadius: 999,

@@ -87,7 +87,11 @@ In-app purchases (Unlimited subscription, boosts, superlikes) will go through **
 ## Known gaps (docs audit, 7 Oct 2026)
 
 - [ ] **`POST /auth/logout` never built.** Listed in the spec (`technical-build-spec.md` §6); mobile just drops the tokens client-side on sign-out, no server call.
-- [ ] **No mobile UI for report, block, or account deletion.** All three exist on the backend only (`SafetyController`, `AccountController`) — there's no screen or flow to trigger them from the app.
+- [ ] **No mobile UI for account deletion.** Exists on the backend only (`AccountController`) — no screen or flow to trigger it from the app. (Report/Block mobile UI is done — see resolved section below.)
+- [ ] **No blocked-users list / unblock UI.** `GET /users/blocked` and `DELETE /users/:id/block` exist on the backend (verified) but the mobile Report/Block slice deliberately didn't build a management screen for them — blocking is one-way from the app today.
+- [ ] **Network error copy mentions "API URL".** Noticed during the Report/Block tap-through: `ApiError`'s network-kind message ("Check your connection and that the API URL is correct") reads like a developer hint, not end-user copy — needs friendlier wording before ship.
+- [ ] **Emoji icons render as "?" in the Simulator.** Noticed during the same tap-through (overflow "⋯", match 🎉, typing/scam-warning glyphs elsewhere) — Simulator font fallback issue most likely, but unconfirmed; check on a real device before treating it as fine.
+- [ ] **Android untested for the Report/Block mobile slice.** The tap-through only covered iOS Simulator; Android (emulator or device) hasn't been run against this UI yet.
 - [ ] **`frontend/` is the untouched original Tindev web app**, not part of SabiPesin — never touched since the fork, per the spec's "almost none of its actual logic survives" note.
 - [ ] **Root `README.md` is still Tindev's original Rocketseat-bootcamp README** — not updated for SabiPesin.
 
@@ -97,6 +101,7 @@ In-app purchases (Unlimited subscription, boosts, superlikes) will go through **
 
 - [x] **Token refresh (mid-session).** Backend `POST /auth/refresh` with rotation, mobile REST refresh-and-retry on 401, and chat socket handshake-rejection recovery via refresh — all three chunks merged. (PR #28)
 - [x] **Report / Block (backend)** — the App Store Guideline 1.2 safety requirement. `Report` + `Block` models, `POST /users/:id/report`, `POST`/`DELETE /users/:id/block`, `GET /users/blocked`, and blocking wired into every surface: discovery, `GET /matches` + `/matches/:id`, `GET /conversations` + `/conversations/:id/messages`, `POST /matches/:id/conversation`, and the socket `message:send` handler (either direction; Match/Conversation docs soft-excluded, never deleted). Backend only — mobile UI is a later slice. Verified against the Atlas dev DB with the real Joe/Girl accounts. (branch `feature/report-block`)
+- [x] **Report / Block (mobile UI)** — `src/api/safety.ts` (`reportUser`, `blockUser`), a new `ReportUserScreen` (reason picker + optional note + success state with an optional "block this person too"), and a "report or block" overflow menu on the Discover card and the Chat header. Blocking never calls `POST /swipes` — the candidate is just dropped from the local deck. Blocking from Chat resets the stack to `Home`/`Matches` so the blocked thread can't be reached via Back. Verified against a throwaway local `mongod` + backend (never Atlas): report success/validation errors, idempotent double-block, post-block exclusion from discovery/matches/conversation-resolve, and socket `message:send` refusal in both directions. (branch `feature/mobile-report-block`)
 - [x] Hardcoded MongoDB credentials rotated out, fresh SabiPesin cluster live and verified
 - [x] Fake Tindev auth (GitHub-signup, spoofable header, dead LoginController) fully stripped
 - [x] JWT foundation built — separate access/refresh secrets, type-claim cross-validation

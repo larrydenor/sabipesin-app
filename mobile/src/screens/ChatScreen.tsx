@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   KeyboardAvoidingView,
   Platform,
@@ -21,10 +22,12 @@ import {
   Message,
   otherUserName,
 } from '../api/messaging';
+import { blockUser } from '../api/safety';
 import { ConnectionState, useChatSocket } from '../realtime/chatSocket';
 import { SafetyBanner } from '../components/SafetyBanner';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { AppStackParamList } from '../navigation/types';
+import { registerCallback } from '../navigation/reportCallbacks';
 import { colors, spacing } from '../theme';
 
 // The conversation screen. Reached from the match overlay or the matches list,
@@ -82,6 +85,9 @@ export function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [peerTyping, setPeerTyping] = useState(false);
+
+  // Report/Block overflow.
+  const [blocking, setBlocking] = useState(false);
 
   // Backward paging bookkeeping (older messages).
   const nextPageRef = useRef(2); // page 1 loads on open; older pages start at 2
@@ -143,11 +149,80 @@ export function ChatScreen() {
     void open();
   }, [open]);
 
-  // Title: show the passed-in name immediately, then the resolved one.
+  // Blocking here always means leaving this chat for good — the match it
+  // belongs to becomes soft-excluded server-side (GET /matches), so there's
+  // nothing left to show in this thread. Reset (not navigate) past Matches so
+  // the blocked person's chat can't be reached again via Back.
+  async function handleBlock() {
+    if (!otherId || blocking) return;
+    setBlocking(true);
+    try {
+      await blockUser(otherId);
+      navigation.reset({ index: 1, routes: [{ name: 'Home' }, { name: 'Matches' }] });
+    } catch (e) {
+      const err = e as ApiError;
+      setSendError(err.message);
+      setBlocking(false);
+    }
+  }
+
+  function confirmBlock() {
+    if (!conversation) return;
+    const name = otherUserName(conversation.otherUser);
+    Alert.alert(
+      `Block ${name}?`,
+      'They won’t be able to message you, and this chat will be removed. You won’t see them in Discover anymore.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Block', style: 'destructive', onPress: () => void handleBlock() },
+      ],
+    );
+  }
+
+  function openOverflow() {
+    if (!otherId || !conversation) return;
+    const name = otherUserName(conversation.otherUser);
+    Alert.alert(name, undefined, [
+      {
+        text: 'Report',
+        onPress: () =>
+          navigation.navigate('ReportUser', {
+            userId: otherId,
+            userName: conversation.otherUser.profile?.name ?? undefined,
+            onBlockedId: registerCallback(() =>
+              navigation.reset({ index: 1, routes: [{ name: 'Home' }, { name: 'Matches' }] }),
+            ),
+            onDoneId: registerCallback(() => navigation.goBack()),
+          }),
+      },
+      { text: 'Block', style: 'destructive', onPress: confirmBlock },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }
+
+  // Title: show the passed-in name immediately, then the resolved one. Overflow
+  // (Report/Block) is attached here too so both stay in the one options update —
+  // React Navigation replaces `options` wholesale, so setting them separately
+  // would drop whichever was set first. The button itself is always rendered
+  // (not hidden pre-load) so the header doesn't jump; `openOverflow` no-ops until
+  // `otherId` resolves.
   useLayoutEffect(() => {
     const title = conversation ? otherUserName(conversation.otherUser) : paramName || 'Chat';
-    navigation.setOptions({ title });
-  }, [navigation, conversation, paramName]);
+    navigation.setOptions({
+      title,
+      headerRight: () => (
+        <Pressable
+          onPress={openOverflow}
+          disabled={blocking}
+          hitSlop={8}
+          accessibilityRole="button"
+          accessibilityLabel="Report or block"
+        >
+          <Text style={styles.headerOverflow}>⋯</Text>
+        </Pressable>
+      ),
+    });
+  }, [navigation, conversation, paramName, blocking]);
 
   // Once connected with a resolved thread, mark it read (clears the peer's unread
   // count for messages already in the history we just loaded). `markRead` is a
@@ -473,6 +548,12 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 15,
     fontWeight: '700',
+  },
+  headerOverflow: {
+    color: colors.text,
+    fontSize: 20,
+    fontWeight: '800',
+    paddingHorizontal: spacing.sm,
   },
   stateContainer: {
     flex: 1,

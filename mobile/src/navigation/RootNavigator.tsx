@@ -18,6 +18,7 @@ import { DiscoverySettingsScreen } from '../screens/DiscoverySettingsScreen';
 import { MatchesScreen } from '../screens/MatchesScreen';
 import { ChatScreen } from '../screens/ChatScreen';
 import { SubscriptionScreen } from '../screens/SubscriptionScreen';
+import { ReportUserScreen } from '../screens/ReportUserScreen';
 
 const AuthStack = createNativeStackNavigator<AuthStackParamList>();
 const AppStack = createNativeStackNavigator<AppStackParamList>();
@@ -201,6 +202,11 @@ function AppFlow() {
         name="Subscription"
         component={SubscriptionScreen}
         options={{ title: 'Unlimited' }}
+      />
+      <AppStack.Screen
+        name="ReportUser"
+        component={ReportUserScreen}
+        options={{ title: 'Report' }}
       />
     </AppStack.Navigator>
   );

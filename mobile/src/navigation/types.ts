@@ -26,4 +26,15 @@ export type AppStackParamList = {
   // Subscription status + Paystack upgrade (Android/web only — iOS shows a
   // coming-soon state), reached from the Discover header.
   Subscription: undefined;
+  // Report-a-user flow (POST /users/:id/report), reached from the Discover card's
+  // and Chat header's overflow menu. `userName` is cosmetic only (screen title).
+  // `onBlockedId`/`onDoneId` are NOT the callbacks themselves — route params must
+  // stay serializable (a function here triggers React Navigation's
+  // "Non-serializable values were found in the navigation state" warning) — they
+  // are ids into `navigation/reportCallbacks`'s registry. `onBlocked` fires after
+  // the screen's own "Block this person too" button succeeds — the ORIGIN screen
+  // owns what that means (advance the deck, reset the nav stack, etc.), since it
+  // differs between Discovery and Chat. `onDone` just closes the screen when the
+  // user reports without blocking.
+  ReportUser: { userId: string; userName?: string; onBlockedId: string; onDoneId: string };
 };
