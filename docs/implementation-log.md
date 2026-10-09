@@ -6,6 +6,81 @@ feature, committed together with that feature's code.
 
 ---
 
+## Account deletion — mobile UI (App Store Guideline 5.1.1(v))
+
+**Why:** `DELETE /account` was backend-only (`AccountController`), with no way
+to trigger it from the app. A separate research pass (branch
+`fix/account-deletion-cancels-subscription`, abandoned with no code) found
+that deletion doesn't cancel a recurring Paystack subscription — but no real
+Paystack subscription object can exist today since `PAYSTACK_UNLIMITED_PLAN_CODE`
+is unset (every checkout is a one-time charge), so that's a currently-dormant
+gap tracked in `docs/sabipesin-todo-list.md`, not something this slice needed
+to fix.
+
+**New file — `src/screens/DeleteAccountScreen.tsx`:** explains what's
+permanently lost (profile, photos, swipe history) vs. kept (the other side of
+a match keeps their chat history — mirrors `AccountController`'s own
+"Match/Conversation/Message kept" behavior). Best-effort `GET /subscriptions/me`
+fetch on mount drives an optional warning block — best-effort because a
+failure must never block deletion itself (Apple requires deletion to always
+be reachable), so there's no error/retry state for that fetch, it just
+silently skips the warning. When `plan === 'unlimited' && status === 'active'`:
+always says the remaining Unlimited time ends immediately (deletion doesn't
+cancel anything); additionally, only when `paymentPlatform === 'ios_iap'`,
+tells the user to cancel in the App Store themselves (no such line for
+`'paystack'` — right now that's always a one-time charge, nothing recurring
+to warn about). Final confirm is an `Alert.alert` destructive dialog, same
+idiom as Block. On success, calls the existing `useAuth().signOut()` — clears
+Keychain/Keystore tokens and flips `isAuthenticated`, which `RootNavigator`
+already reads to swap to the phone-entry screen; no new clearing logic or
+manual navigation needed.
+
+**`api/account.ts`:** added `deleteAccount()` (`DELETE /account`, no body) next
+to the existing email wrappers.
+
+**Entry point — `SubscriptionScreen.tsx`:** a low-emphasis "Delete my account"
+link at the bottom, added to both the normal `ready` return AND the `error`
+state (the subscription-status fetch failing must not hide the only path to
+deletion), and deliberately NOT inside any `Platform.OS` or plan-status
+conditional — it was placed after every other conditional block specifically
+so it can't accidentally end up scoped to the Android-only upgrade flow or
+excluded from the iOS "coming soon" branch.
+
+**Verification:** backend contract tested live against a throwaway local
+`mongod` + backend (never Atlas), zero-photo accounts throughout (Cloudinary
+requires real credentials to even boot the backend, so the discipline of
+never giving a test account a `publicId` is what keeps this safe — same
+reasoning as the Report/Block slice). Confirmed: a free user deletes cleanly;
+a user with an active `unlimited`/`paystack` Subscription row (inserted
+directly, no subscription code — matching the real current state) deletes
+too, and `GET /subscriptions/me` returns exactly the shape the screen's
+warning logic branches on; the old access token 401s ("User no longer
+exists") immediately after deletion; re-running the OTP flow on the same
+phone number creates a genuinely new `User` document; a request to an
+unreachable port confirms the connection-refused/no-response path that
+`ApiError`'s existing network-kind handling already covers (no new error
+code needed — `DeleteAccountScreen` reuses the same `apiClient`/`toApiError`
+plumbing as every other screen). Also confirmed, as expected: the
+`Subscription` row for the deleted paid user is left orphaned afterward
+(`deleteAccount` doesn't touch that collection) — exactly the gap recorded in
+the todo list. Mobile `tsc --noEmit` clean.
+
+On top of that, a full tap-through was completed manually in the iOS
+Simulator against the same local scratch DB (never Atlas), zero-photo
+accounts. Since both test accounts got stuck on the photo-upload onboarding
+step with zero photos, each was given one placeholder photo record with a
+deliberately fake `publicId` (`deletetest/does-not-exist-A`/`-B`) to clear
+that gate — exercising the exact `deleteImage` "not found" path read above:
+Cloudinary replied `{ result: 'not found' }` for both, and `deleteAccount`
+treated it as success, never touching a real asset. Confirmed: the
+active-Paystack-subscription account (B) showed the warning box, Back and
+Cancel both worked without side effects, and deleting signed out straight to
+the phone-entry screen; the free account (A) showed no warning box and
+deleted the same way; re-registering B's old phone number landed on Profile
+Setup as a brand-new user, not the deleted one.
+
+---
+
 ## Report / Block — mobile UI (App Store Guideline 1.2)
 
 **Why:** The backend (`SafetyController`, `Report`/`Block` models, blocking

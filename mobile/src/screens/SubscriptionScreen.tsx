@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as WebBrowser from 'expo-web-browser';
+import { useNavigation } from '@react-navigation/native';
+import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 
 import { getMyEmail, updateMyEmail } from '../api/account';
 import { ApiError } from '../api/errors';
@@ -10,7 +12,10 @@ import {
   SubscriptionStatusResponse,
 } from '../api/subscriptions';
 import { PrimaryButton } from '../components/PrimaryButton';
+import { AppStackParamList } from '../navigation/types';
 import { colors, spacing } from '../theme';
+
+type SubscriptionNav = NativeStackNavigationProp<AppStackParamList, 'Subscription'>;
 
 // Polling cadence/budget after the Paystack browser session closes. The webhook
 // that actually activates the plan runs async server-side, so there's no signal
@@ -44,6 +49,7 @@ type EmailSaveState = 'idle' | 'saving' | 'saved';
 type EmailSaveResult = { ok: true } | { ok: false; reason: 'format' | 'save-failed' };
 
 export function SubscriptionScreen() {
+  const navigation = useNavigation<SubscriptionNav>();
   const [screen, setScreen] = useState<Screen>('loading');
   const [loadError, setLoadError] = useState<string | null>(null);
   const [status, setStatus] = useState<SubscriptionStatusResponse | null>(null);
@@ -224,6 +230,7 @@ export function SubscriptionScreen() {
           <Text style={styles.stateText}>{loadError}</Text>
         </View>
         <PrimaryButton title="Try again" onPress={() => void load()} />
+        <DeleteAccountLink onPress={() => navigation.navigate('DeleteAccount')} />
       </View>
     );
   }
@@ -337,7 +344,21 @@ export function SubscriptionScreen() {
           </Text>
         </View>
       )}
+
+      <DeleteAccountLink onPress={() => navigation.navigate('DeleteAccount')} />
     </View>
+  );
+}
+
+// Reached from both the normal and the error states — must always be visible,
+// regardless of platform or plan, so account deletion is never dependent on
+// the subscription-status fetch having succeeded (App Store Guideline 5.1.1(v)
+// requires deletion to always be reachable).
+function DeleteAccountLink({ onPress }: { onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} hitSlop={8} accessibilityRole="button" style={styles.deleteLink}>
+      <Text style={styles.deleteLinkText}>Delete my account</Text>
+    </Pressable>
   );
 }
 
@@ -533,5 +554,15 @@ const styles = StyleSheet.create({
     fontSize: 15,
     marginTop: spacing.sm,
     lineHeight: 22,
+  },
+  deleteLink: {
+    marginTop: spacing.xl,
+    alignItems: 'center',
+    padding: spacing.sm,
+  },
+  deleteLinkText: {
+    color: colors.danger,
+    fontSize: 14,
+    fontWeight: '700',
   },
 });

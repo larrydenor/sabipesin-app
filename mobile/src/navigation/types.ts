@@ -37,4 +37,8 @@ export type AppStackParamList = {
   // differs between Discovery and Chat. `onDone` just closes the screen when the
   // user reports without blocking.
   ReportUser: { userId: string; userName?: string; onBlockedId: string; onDoneId: string };
+  // Account deletion (App Store Guideline 5.1.1(v)), reached from a link on
+  // SubscriptionScreen. Self-only, no params — mirrors DELETE /account always
+  // targeting the caller.
+  DeleteAccount: undefined;
 };
