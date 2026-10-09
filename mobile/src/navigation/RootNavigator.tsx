@@ -19,6 +19,7 @@ import { MatchesScreen } from '../screens/MatchesScreen';
 import { ChatScreen } from '../screens/ChatScreen';
 import { SubscriptionScreen } from '../screens/SubscriptionScreen';
 import { ReportUserScreen } from '../screens/ReportUserScreen';
+import { DeleteAccountScreen } from '../screens/DeleteAccountScreen';
 
 const AuthStack = createNativeStackNavigator<AuthStackParamList>();
 const AppStack = createNativeStackNavigator<AppStackParamList>();
@@ -207,6 +208,11 @@ function AppFlow() {
         name="ReportUser"
         component={ReportUserScreen}
         options={{ title: 'Report' }}
+      />
+      <AppStack.Screen
+        name="DeleteAccount"
+        component={DeleteAccountScreen}
+        options={{ title: 'Delete account' }}
       />
     </AppStack.Navigator>
   );
